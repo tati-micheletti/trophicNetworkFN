@@ -24,6 +24,9 @@ harmonize_taxonomy <- function(diet_raw, taxon_map,
     sort = FALSE
   )
   
+  # Remove categories that need exclusion
+  out <- out[Keep==TRUE, ]
+  
   ## Check for taxa without mapping
   missing <- out[is.na(Standardized_Name), prey]
   
@@ -33,7 +36,7 @@ harmonize_taxonomy <- function(diet_raw, taxon_map,
       paste(missing, collapse = ", ")
     )
   }
-  out <- out[Keep==TRUE,]
+
   ## Replace original names
   if (finalNaming == "Ecological"){
     out[, prey := Ecological_Group]
