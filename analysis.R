@@ -46,6 +46,19 @@ source("functions/helpers.R")
 
 ###############################################################################
 ## 4. Harmonize prey names
+## Note: The last column in the Workbook FoodwebData called `mapping` (column 
+## Ecological_Group) is currently the one used for the final groupping of diet 
+## items. 
+## TO REMOVE AN ITEM: Simply change in the column `Keep` from TRUE to FALSE, 
+##                    save the notebook and re-run the analysis from the 
+##                    beginning
+## TO CHANGE THE GROUPPING: I strongly suggest creating a new column and using 
+##                          the columns name below as argument for `finalNaming`
+## /!\ ATTENTION /!\ Several names in different groups match! If you need to 
+## exclude  an item for one group, make sure that the same item is NOT in other
+## groups. One "easy and clever" way to do this is to slightly change the name 
+## of the item in the plans you do NOT want to change and add them as a new row
+## on the table, making sure the columns Keep is set to TRUE.
 ###############################################################################
 
 cats  <- harmonize_taxonomy(cats,  mapping, finalNaming = "Ecological")
