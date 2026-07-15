@@ -200,7 +200,7 @@ for(i in 1:1000){
   order(abs(PTout),decreasing = T)
   
   
-Tm[,1],Tm.rem[,1]
+  Tm[,1],Tm.rem[,1]
 
 # Computes indirect effects from a matrix (mat) and a vector of interaction dependencies (R)
 # R is a single vector with length = sum(nrow(mat), ncol(mat)) corresponding to the R value of the ROWS and COLUMNS
