@@ -1,0 +1,222 @@
+---
+title: "Scenario analysis for the Noronha trophic network"
+output: html_document
+---
+
+# Scenario analysis
+
+This document extends the original analysis by adding two complementary analyses:
+
+1. **Rat diet uncertainty** (sampling uncertainty in the PSIRI estimates).
+2. **Management scenarios** (changes in invasive predator abundance).
+
+```{r setup}
+library(data.table)
+
+# Objects assumed to exist from the main workflow:
+# psiri
+# rawFreq
+# spp
+# samplesInvaders
+# densities
+# R.vec
+# indirect()
+```
+
+# Helper function
+
+```{r}
+build_M <- function(psiri, rawFreq, samplesInvaders, densities){
+
+  Bw <- rawFreq
+
+  Bw[, names(samplesInvaders)] <-
+    Bw[, names(samplesInvaders)] /
+    matrix(samplesInvaders,
+           nrow = nrow(Bw),
+           ncol = length(samplesInvaders),
+           byrow = TRUE)
+
+  Bw[, names(samplesInvaders)] <-
+    Bw[, names(samplesInvaders)] *
+    matrix(densities,
+           nrow = nrow(Bw),
+           ncol = length(densities),
+           byrow = TRUE)
+
+  0.1 * t(psiri) + Bw
+}
+```
+
+# 1. Rat diet uncertainty
+
+The rat diet is based on only 10 samples. We generate plausible alternative
+PSIRI vectors using a Dirichlet approximation centred on the observed diet.
+
+```{r}
+# install.packages("gtools")
+library(gtools)
+
+simulate_rat_psiri <- function(psiri,
+                               rat = "rattus_rattus",
+                               n = 10){
+
+  p <- psiri[, rat]
+
+  p[p < 0] <- 0
+  p <- p / sum(p)
+
+  alpha <- p * n + 1e-6
+
+  psiri_new <- psiri
+  psiri_new[, rat] <- as.numeric(rdirichlet(1, alpha))
+
+  psiri_new
+}
+```
+
+Run 1000 uncertainty realizations.
+
+```{r}
+set.seed(123)
+
+n_sim <- 1000
+
+rat_results <- vector("list", n_sim)
+
+for(i in seq_len(n_sim)){
+
+  psiri_i <- simulate_rat_psiri(psiri)
+
+  M_i <- build_M(
+    psiri = psiri_i,
+    rawFreq = rawFreq,
+    samplesInvaders = samplesInvaders,
+    densities = densities
+  )
+
+  rat_results[[i]] <- indirect(M_i, R.vec)$Tmat
+}
+```
+
+# 2. Management scenarios
+
+Each value represents the remaining fraction of the original abundance.
+
+```{r}
+management <- list(
+
+  baseline = c(
+    felis_catus = 1,
+    rattus_rattus = 1,
+    salvator_merianae = 1,
+    rhinella = 1
+  ),
+
+  cat_control = c(
+    felis_catus = 0.1,
+    rattus_rattus = 1,
+    salvator_merianae = 1,
+    rhinella = 1
+  ),
+
+  rat_control = c(
+    felis_catus = 1,
+    rattus_rattus = 0.1,
+    salvator_merianae = 1,
+    rhinella = 1
+  ),
+
+  tegu_control = c(
+    felis_catus = 1,
+    rattus_rattus = 1,
+    salvator_merianae = 0.1,
+    rhinella = 1
+  ),
+
+  toad_control = c(
+    felis_catus = 1,
+    rattus_rattus = 1,
+    salvator_merianae = 1,
+    rhinella = 0.1
+  ),
+
+  cat_rat = c(
+    felis_catus = 0.1,
+    rattus_rattus = 0.1,
+    salvator_merianae = 1,
+    rhinella = 1
+  ),
+
+  all_invaders = c(
+    felis_catus = 0.1,
+    rattus_rattus = 0.1,
+    salvator_merianae = 0.1,
+    rhinella = 0.1
+  )
+)
+```
+
+```{r}
+run_management <- function(psiri,
+                           rawFreq,
+                           samplesInvaders,
+                           densities,
+                           reductions){
+
+  densities_new <- densities
+
+  densities_new[names(reductions)] <-
+    densities_new[names(reductions)] * reductions
+
+  M <- build_M(
+    psiri = psiri,
+    rawFreq = rawFreq,
+    samplesInvaders = samplesInvaders,
+    densities = densities_new
+  )
+
+  indirect(M, R.vec)
+}
+```
+
+Run all scenarios.
+
+```{r}
+scenario_results <-
+  lapply(management, function(x)
+    run_management(
+      psiri = psiri,
+      rawFreq = rawFreq,
+      samplesInvaders = samplesInvaders,
+      densities = densities,
+      reductions = x
+    )
+  )
+```
+
+# 3. Combined uncertainty + management
+
+```{r}
+combined_results <- list()
+
+set.seed(123)
+
+for(sim in seq_len(200)){
+
+  psiri_i <- simulate_rat_psiri(psiri)
+
+  for(sc in names(management)){
+
+    combined_results[[paste(sim, sc, sep = "_")]] <-
+      run_management(
+        psiri = psiri_i,
+        rawFreq = rawFreq,
+        samplesInvaders = samplesInvaders,
+        densities = densities,
+        reductions = management[[sc]]
+      )
+  }
+}
+```
+

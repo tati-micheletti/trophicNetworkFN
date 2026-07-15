@@ -1,10 +1,23 @@
+# =============================================================================
+# Total Effect Analysis — Fernando de Noronha Food Web
+# Computes the T matrix of total (direct + indirect) effects using
+# PSIRI-based interaction strengths and density-weighted predator consumption.
+# Includes sensitivity analysis on R and predator removal simulations.
+# =============================================================================
 #Total effect analysis based on dietary data for the Noronha food web
 Require::Require("data.table")
-psiri <- as.matrix(read.csv("data/psiri.csv", header = TRUE, row.names = 1)) #PSRI for predators
-rawFreq <- as.matrix(read.csv("data/rawFreq.csv", header = TRUE, row.names = 1)) #Raw frequencies of resource use computed from dietary studies
-spp <- read.csv("data/species.csv", header = TRUE)
+Require::Require("reshape")
+Require::Require("ggplot2")
+Require::Require("cowplot")
+# Require::Require("dplyr")
+
+psiri <- as.matrix(read.csv("data/temp/psiri.csv", header = TRUE, row.names = 1)) #PSRI for predators
+rawFreq <- as.matrix(read.csv("data/temp/rawFreq.csv", header = TRUE, row.names = 1)) #Raw frequencies of resource use computed from dietary studies
+spp <- read.csv("data/temp/species.csv", header = TRUE)
 
 ord <- c('r1', 'r2', 'r3', 'r4', 'r5', 'r6', 'm1', 'm2', 'p1','p2', 'p3')
+psiri <- psiri[ord,ord]
+rawFreq <- rawFreq[ord,ord]
 spp <- as.data.table(spp)
 spp[, abr := factor(abr, levels = ord)]
 setkey(spp, "abr")
@@ -13,160 +26,286 @@ lookup <- setNames(spp$name, as.character(spp$abr))
 rownames(psiri) <- rownames(rawFreq) <- lookup[rownames(psiri)]
 colnames(psiri) <- colnames(rawFreq) <- lookup[colnames(psiri)]
 
-psiri <- psiri[ord,ord]
-rawFreq <- rawFreq[ord,ord]
-
+# =============================================================================
+# Build interaction matrix M
+# Columns 8-11 are the four invasive predators: cats, tegu, rats, toads.
+# Per-capita consumption = raw frequency / sample size, then scaled by density.
+# =============================================================================
 Bw <- rawFreq
-samplesInvaders <- c(78, # cats (n=78) Gaiotto et al., 2020
-                     22, # tegu (n=22) Gaiotto et al., 2020
-                     10, # rats (n=10) Gaiotto et al., 2020
-                     66) # ???? toads? (n=143) Tolledo & Toledo (2015) Not matching the text!
+samplesInvaders <- c("felis_catus" = 78, # cats (n=78) Gaiotto et al., 2020
+                     "salvator_merianae" = 22, # tegu (n=22) Gaiotto et al., 2020
+                     "rattus_rattus" = 10, # rats (n=10) Gaiotto et al., 2020
+                     "rhinella" = 66) # ???? toads? (n=143) Tolledo & Toledo (2015) Not matching the text!
 
-Bw[,8:11] <- rawFreq[,8:11]/matrix(samplesInvaders, ncol = 4, nrow = nrow(rawFreq), byrow = T ) # Average individual consumption (Frequency/sample size)
+Bw[,names(samplesInvaders)] <- Bw[,names(samplesInvaders)]/matrix(samplesInvaders, 
+                                                                  ncol = 4, 
+                                                                  nrow = nrow(rawFreq), 
+                                                                  byrow = TRUE) # Average individual consumption (Frequency/sample size)
 
-densities <- c(0.71, # feral cats, 0.71 ind/ha , Dias et al. 2017
-               3.98, # tegu 3.98 ind/ha Abrahão et al. 2019
-               37, # rats 37 ind/ha, Russell et al. 2018
-               10.35) # Toads, extrapolation from Solomon Islands, Pikacha et al. 2015
+densities <- c("felis_catus" = 0.71, # feral cats, 0.71 ind/ha , Dias et al. 2017
+               "salvator_merianae" = 3.98, # tegu 3.98 ind/ha Abrahão et al. 2019
+               "rattus_rattus" = 37, # rats 37 ind/ha, Russell et al. 2018
+               "rhinella" = 10.35) # Toads, extrapolation from Solomon Islands, Pikacha et al. 2015
 
-Bw[,8:11] <- Bw[,8:11]*matrix(densities, ncol = 4, nrow = nrow(rawFreq), byrow = T ) # weighting consumption by estimated density of the predator
-
-rowSums(psiri)
-rowSums(Bw)
+Bw[,names(samplesInvaders)] <- Bw[,names(samplesInvaders)]*matrix(densities, 
+                                                                  ncol = 4, 
+                                                                  nrow = nrow(rawFreq), 
+                                                                  byrow = TRUE) # weighting consumption by estimated density of the predator
 
 # M matrix - effects of columns over rows
 M <- 0.1 * t(psiri) # effect of prey over predators - energetic efficiency of predators is low
-M <- M  + Bw # adding the effect of predators over prey
+M2 <- M  + Bw # adding the effect of predators over prey
 
-R.vec <- c(0.1,0.1,0.5,0.5,0.5,0.1,0.2,0.8,0.8,0.8,0.8) #???? Not explained how we got to these values...
 
-T.matrix <- indirect(M, R = R.vec, type = "unipartite") 
+# R.vec: species-specific interaction dependency / sensitivity parameters
+# (one value per species, controls how strongly each species responds to net effects)
+R.vec <- c(
+  invertebrados_ter     = 0.1,
+  invertebrados_aq      = 0.1,
+  rodentia               = 0.5,
+  kerodon_rupestris      = 0.5,
+  birds                  = 0.1,
+  amphisbaena_ridleyi    = 0.2,
+  trachylepis_atlantica  = 0.5,
+  rattus_rattus          = 0.8,
+  felis_catus            = 0.8,
+  salvator_merianae      = 0.8,
+  rhinella               = 0.8
+)
+
+stopifnot(setequal(names(R.vec), colnames(M)))  # catches typos/missing species
+R.vec <- R.vec[colnames(M)]  # reorders defensively to match M regardless of how R.vec was typed
+
+#######################
+#                     #
+# FUNCTION indirect   #
+#                     #
+#######################
+
+# indirect()
+# Computes the T matrix of total (direct + indirect) effects.
+#
+# Arguments:
+#   mat  - Square interaction matrix (unipartite) or biadjacency matrix
+#          (bipartite, not yet implemented). Entry [i,j] = effect of j on i.
+#   R    - Numeric vector of interaction-dependency parameters (one per species).
+#          Length = nrow(mat) for unipartite; nrow+ncol for bipartite.
+#   type - "unipartite" (default) or "bipartite".
+#
+# Returns a list:
+#   mean_contribution  - Mean total effect exerted by each species (col means of T)
+#   prop_ind_eff       - Network-wide proportion of effects that are indirect
+#   prop_ind_eff_tin   - Per-species proportion of received effects that are indirect
+#   prop_ind_eff_tout  - Per-species proportion of exerted effects that are indirect
+#   direct             - Direct-effect matrix (P %*% W)
+#   Tmat               - Full S x S total-effects matrix T = (I - PW)^{-1}
+#
+# Note: upper triangle of W is sign-flipped to encode antagonistic interactions.
+#       Diagonal (self-effects) set to NA before summarising contributions.
+#
+# Computes indirect effects from a matrix (mat) and a vector of interaction dependencies (R)
+# R is a single vector with length = sum(nrow(mat), ncol(mat)) corresponding to the R value of the ROWS and COLUMNS
+# Example: 
+# indirect(mat=matrix(rnbinom(Na*Np,1,0.2),nrow=Na,ncol=Np),R=0.5)
+#==========================================================================
+
+# indirect <- function(mat, R) {
+#   
+#   ## -------------------------------------------------------------------------
+#   ## Input checks
+#   ## -------------------------------------------------------------------------
+#   
+#   stopifnot(is.matrix(mat))
+#   stopifnot(nrow(mat) == ncol(mat))
+#   
+#   stopifnot(is.numeric(R))
+#   stopifnot(length(R) == nrow(mat))
+#   
+#   stopifnot(!anyNA(mat))
+#   stopifnot(!anyNA(R))
+#   
+#   S <- nrow(mat)
+#   
+#   ## -------------------------------------------------------------------------
+#   ## Build dependency matrix (W)
+#   ##
+#   ## Each row is divided by its total interaction strength so rows sum to 1.
+#   ## -------------------------------------------------------------------------
+#   
+#   row_totals <- rowSums(mat)
+#   stopifnot(all(row_totals > 0))
+#   W <- mat / row_totals
+#   
+#   ## -------------------------------------------------------------------------
+#   ## Sign convention
+#   ##
+#   ## Upper triangle = antagonistic effects
+#   ##
+#   ## (We'll probably improve this later because it currently depends on species
+#   ## ordering.)
+#   ## -------------------------------------------------------------------------
+#   
+#   consumers <- spp$name[spp$is_consumer]
+#   prey <- setdiff(rownames(W), consumers)
+#   
+#   W[prey, consumers] <- -W[prey, consumers]
+#   
+#   ## -------------------------------------------------------------------------
+#   ## Interaction matrix
+#   ## -------------------------------------------------------------------------
+#   
+#   P <- diag(R)
+#   
+#   ## -------------------------------------------------------------------------
+#   ## Total effects matrix
+#   ##
+#   ## T = (I - P W)^(-1)
+#   ## -------------------------------------------------------------------------
+#   
+#   I <- diag(S)
+#   
+#   Tmat <- solve(I - P %*% W)
+#   
+#   ## Ignore self-effects when computing summaries
+#   
+#   T_no_diag <- Tmat
+#   diag(T_no_diag) <- NA
+#   
+#   ## -------------------------------------------------------------------------
+#   ## Mean contribution (Tout)
+#   ## -------------------------------------------------------------------------
+#   
+#   mean_contribution <- colMeans(T_no_diag, na.rm = TRUE)
+#   
+#   ## -------------------------------------------------------------------------
+#   ## Binary adjacency matrix indicating the presence (1) or absence (0)
+#   ## of direct interactions. Used to distinguish species pairs connected
+#   ## only through indirect pathways from those with direct interactions.
+#   ## -------------------------------------------------------------------------
+#   
+#   B <- (mat > 0) * 1
+#   
+#   ## -------------------------------------------------------------------------
+#   ## Proportion of indirect effects
+#   ## -------------------------------------------------------------------------
+#   
+#   indirect_only <- T_no_diag * (1 - B)
+#   
+#   prop_ind_eff <-
+#     sum(indirect_only, na.rm = TRUE) /
+#     sum(T_no_diag, na.rm = TRUE)
+#   
+#   prop_ind_eff_tin <-
+#     rowSums(indirect_only, na.rm = TRUE) /
+#     rowSums(T_no_diag, na.rm = TRUE)
+#   
+#   prop_ind_eff_tout <-
+#     colSums(indirect_only, na.rm = TRUE) /
+#     colSums(T_no_diag, na.rm = TRUE)
+#   
+#   ## -------------------------------------------------------------------------
+#   ## Return
+#   ## -------------------------------------------------------------------------
+#   
+#   list(
+#     mean_contribution = mean_contribution,
+#     prop_ind_eff      = prop_ind_eff,
+#     prop_ind_eff_tin  = prop_ind_eff_tin,
+#     prop_ind_eff_tout = prop_ind_eff_tout,
+#     direct            = P %*% W,
+#     Tmat              = Tmat
+#   )
+# }
+
+#######################
+
+# T.matrix <- indirect(M2, R = R.vec, type = "unipartite") 
+T.matrix <- calculate_effect_matrix(M2, R = R.vec)
 
 Tm <- T.matrix$Tmat
-colnames(Tm) <- colnames(M)
-
-#Pred.eff <- Tm[,1:4]
-#rownames(Pred.eff) <- spp[,1]
 
 #Negative Tout
-NT <- (Tm < 0)*Tm
+NT <- pmin(Tm, 0)
+
 NTout <- colSums(NT)
 sort(NTout)
 hist(as.numeric(Tm), col = 'darkgrey')
 
-
 #Positive Tout
 PT <- (Tm > 0)*Tm
 PTout <- colSums(PT)
-sort(PTout, decreasing = T)
+sort(PTout, decreasing = TRUE)
 
 mean(NT)
-
 hist(as.numeric(PTout), col = 'darkgrey')
 
+# =============================================================================
+# Visualisation — heatmap and histograms of T matrix values
+# =============================================================================
 ##### plotting ####
 ####ggplot
-install.packages("reshape")
-library(reshape)
-library(ggplot2)
 
 # Transform the matrix in long format
-diag(Tm)=NA
-
-df <- melt(Tm)
+Tm_plot <- Tm
+diag(Tm_plot) <- NA
+df <- as.data.table(as.table(Tm_plot))
 colnames(df) <- c("x", "y", "value")
 
-
-pdf("graph2.pdf", width = 14, height = 8)
-ggplot(df, aes(x = x, y = ordered(y, levels = rev(sort(unique(y)))), fill = value)) +
+p1 <- ggplot(df, aes(x = x, y = ordered(y, levels = rev(sort(unique(y)))), fill = value)) +
   geom_tile(color = "black") +
   scale_fill_gradient2(low = "#FF0000",
                        mid = "#FFFFFF",
                        high = "#87CEFA", n.breaks=15, limits = c(-0.5,1), na.value = "lightgrey") +
   coord_fixed()+
   xlab("")+ ylab("")
-dev.off()
 
 #################### hist #############
 
 df<-data.frame(as.numeric(PT))
 colnames(df)<-"value"
 
-library(dplyr)
-library(cowplot)
-
-pdf("hist_pos.pdf", width = 14, height = 8)
 a<-ggplot(df, aes(x=value)) +
   geom_histogram(fill="darkgrey", color="black", alpha=1) +
   ylim(c(0,80))+
   theme_classic()+ xlab("Positive T matrix values")+ ylab("Count")
-dev.off()
 
 df2<-data.frame(as.numeric(NT))
 colnames(df)<-"value"
 
-pdf("hist_neg.pdf", width = 14, height = 8)
 b<-ggplot(df,aes(x=value)) +
   geom_histogram(fill="darkgrey", color="black", alpha=1) +
   ylim(c(0,80))+
   theme_classic()+ xlab("Negative T matrix values")+ ylab("Count")
-dev.off()
 
 plot_grid(b, a, labels = c('psiri', 'rawFreq'))
 
+# Shouldn't I remove below?
+# pdf("hist.pdf", width = 14, height = 8)
+# data %>%
+#   ggplot(aes(x=value, fill=type)) +
+#   geom_histogram(  position = 'identity') +
+#   scale_fill_manual(name="Type",labels=c("Negative","Positive", "Zero"),values=c("skyblue1", "tomato", "grey")) +
+#   theme_classic(base_size = 15) + xlab("T matrix values")+ ylab("Count")
+# dev.off()
 
-data<-read.table("clipboard", header=T)
-data
+## PLOTTING
 
-pdf("hist.pdf", width = 14, height = 8)
-data %>%
-  ggplot(aes(x=value, fill=type)) +
-  geom_histogram(  position = 'identity') +
-  scale_fill_manual(name="Type",labels=c("Negative","Positive", "Zero"),values=c("skyblue1", "tomato", "grey")) +
-  theme_classic(base_size = 15) + xlab("T matrix values")+ ylab("Count")
-dev.off()
-p
-
-
-
-library(plotrix)
-
-# generate colors that show negative values in red to brown
-# and positive in blue-green to green
-cellcol<-matrix(rep("#000000",100),nrow=10)
-cellcol[Tm<0]<-color.scale(Tm[Tm<0],c(0,1),c(0,0),0.2)
-cellcol[Tm>0]<-color.scale(Tm[Tm>0],0,c(0.2,0),c(0,1))
-
-
-cellcol=color.scale(Tm,extremes=c("#FF7F50","#ADD8E6"))
-color2D.matplot(Tm,cellcolors=cellcol,xlab="Columns",ylab="Rows",
-                do.hex=FALSE,border="#F5F5F5")
-
-
-pal = colorRampPalette(c("steelblue", "white", "darkorange"))
-val.grad <- c(do.breaks(c(-min_max[1], 0),49), do.breaks(c(0, min_max[2]),50))
-
-heatmap(as.matrix(Tm), Colv = NA,Rowv = NA,col = hcl.colors(200, palette = "RdBu"))
-
-
-color2D.matplot(Tm,extremes=c("#FF6347","#FFA07A","white","#E0FFFF","#B0E0E6"),border="white", axes=FALSE, xlab="", ylab="")
-
-color2D.matplot(Tm,extremes=c("#FF6347","white","#B0E0E6"),border="white", axes=FALSE, xlab="", ylab="")
-
-color2D.matplot(Tm,extremes=c("white","#2B83BA","#ABDDA4","#FFFFBF","#FDAE61","#D7191C"),border=NA, axes=FALSE, xlab="", ylab="")
 
 
 #============================================
+# Sensitivity Analysis: robustness of T_out species rankings to choice of R.
+# Draws 1000 random R vectors; Spearman-correlates resulting T_out ranks with
+# baseline to check whether influence rankings are stable regardless of R.
 #Sensitivity test to R values
 
 #1. Change R
 #2. correlation between Tout values
 
-r.neg <- c()
-r.pos <- c()
-for(i in 1:1000){
+r.neg <- numeric(1000)
+r.pos <- numeric(1000)
+for(i in seq_len(1000)){
   R.temp <- runif(nrow(psiri)) #randomly assigning R
-  Tm.temp <- indirect(M, R = R.temp, type = "unipartite") 
+  Tm.temp <- indirect(M, R = R.temp) 
   Tm.temp <- Tm.temp$Tmat
   
   NT.temp <- (Tm.temp < 0)*Tm.temp
@@ -189,124 +328,35 @@ for(i in 1:1000){
 #even when randomly assigning R values, the relative rank of species influence is consistent
   
 
-#=========================================================
-#Removal Simulations
-#how removing the predators change the net effects
-#1. Number of signal shifts
-#2. delta Tout
-#3. Changes in the effect over endemic species (Trachileps)
-
-  M.rem <- M
-  M.rem[,1] <- 0.1*M.rem[,1]
-  Tm.rem <- indirect(M.rem, R = R.vec, type = "unipartite") 
-  
-  Tm.rem <- Tm.rem$Tmat
-  colnames(Tm.rem) <- colnames(M)
-  
-  #Negative Tout
-  NT <- (Tm.rem < 0)*Tm.rem
-  NTout <- colSums(NT)
-  order(abs(NTout),decreasing = T)
-  
-  #Positive Tout
-  PT <- (Tm > 0)*Tm
-  PTout <- colSums(PT)
-  order(abs(PTout),decreasing = T)
   
   
-  Tm[,1],Tm.rem[,1]
-
-# Computes indirect effects from a matrix (mat) and a vector of interaction dependencies (R)
-# R is a single vector with length = sum(nrow(mat), ncol(mat)) corresponding to the R value of the ROWS and COLUMNS
-# Example: 
-# indirect(mat=matrix(rnbinom(Na*Np,1,0.2),nrow=Na,ncol=Np),R=0.5)
-#==========================================================================
-indirect <- function(mat, R, type = "bipartite"){
-  if(!is.matrix(mat)){
-    stop('mat must be a matrix')
-  }
-  if(!is.numeric(R)){
-    stop('R must be a numeric vector')
-  }
   
-  if(type == "bipartite"){
-    stop('R must be a numeric vector')
-    
-    Na <- nrow(mat)
-    Np <- ncol(mat)
-    S  <- Na + Np # species richness
-    
-    if(length(R) != S){
-      stop('R must be a vector of length = nrow(mat) + ncol(mat)')
-    }
-    
-    # adjacency matrix
-    full <- matrix(0, S, S)
-    full[1:Na, (Na+1):S] <- mat
-    full[(Na+1):S,1:Na]  <- t(mat)
-  }else{
-    full <- mat 
-    
-    S <- nrow(mat)
-  }
-  # Bidependence matrix - dependence of rows over columns
-  W <- full/rowSums(full)
-  
-  #W[which(lower.tri(M))] <- (-1)*W[which(lower.tri(M))] #only for antagonisms
-  W[which(upper.tri(M))] <- (-1)*W[which(upper.tri(M))] #only for antagonisms
-  
-  # Identity matrix
-  I <- diag(S)
-  
-  # interaction effect matrix
-  P <- diag(R, S, S)
-  
-  # T matrix (effects of the columns on the rows )
-  MT <- I-(P%*%W)
-  MT <- solve(MT)
-  MT. <- matrix(0, S ,S)
-  
-  #Nakajima and Higashi 1995
-  #for (i in 1:S){
-  # for (j in 1:S){
-  #  MT.[i,j] <- MT[i,j]/((MT[i,i]*MT[j,j])-(MT[i,j]*MT[j,i])) 
-  #} 
-  #} 
-  #diag(MT.) <- NA
-  
-  # MT <- MT-I
-  
-  #Disconsidering auto-indirect effects
-  MT_zdiag <- MT
-  diag(MT_zdiag) <- NA
-  
-  # In_ind<-apply(MT,1,sum) # effect suscetibility --> 1/(1-P)
-  #sum_Out.ind <- colSums(MT_zdiag, na.rm = T) #indirect effect contribution
-  #Out.ind <- Out.ind/sum(MT_zdiag)
-  Out.ind <- apply(MT_zdiag,2,mean, na.rm = TRUE)
-  # Computing ratio of indirect/direct effects
-  # Binary matrix
-  rawFreq <- full
-  rawFreq[rawFreq>0] <- 1
-  
-  # Proportion of indirect effects in the whole network
-  Ind.net <- sum(MT_zdiag*(1-rawFreq),na.rm=T)/sum(MT_zdiag, na.rm=TRUE) 
-  
-  # Proportion of indirect effects over each species
-  Ind.sp.in <- apply(MT_zdiag*(1-rawFreq),1,sum,na.rm=T)/apply(MT_zdiag,1,sum,na.rm=TRUE) 
-  # Proportion of indirect effects of each species
-  Ind.sp.out <- apply(MT_zdiag*(1-rawFreq),2,sum,na.rm=T)/apply(MT_zdiag,2,sum,na.rm=TRUE) 
-  
-  results <- list(
-    #summed_contribution = sum_Out.ind, #total species contribution
-    mean_contribution = Out.ind, #mean species contribution
-    prop_ind_eff = Ind.net, #proportion of indirect effects
-    prop_ind_eff_tin = Ind.sp.in, 
-    prop_ind_eff_tout = Ind.sp.out,
-    direct = (P%*%W),
-    Tmat = MT #Total effects matrix
-    
-  )
-  return(results)
-  
-}
+# #=========================================================
+# #Removal Simulations
+# #how removing the predators change the net effects
+# #1. Number of signal shifts
+# #2. delta Tout
+# #3. Changes in the effect over endemic species (Trachileps)
+#   
+#   #TODO: simulate several eradication scenarios
+#   species_removed <- c("felis_catus", "salvator_merianae")
+#   M.rem <- M
+#   M.rem[, species_removed] <- 0.1 * M.rem[, species_removed]
+#   
+#   Tm.rem <- indirect(M.rem, R = R.vec) 
+#   
+#   Tm.rem <- Tm.rem$Tmat
+#   colnames(Tm.rem) <- colnames(M)
+#   
+#   #Negative Tout
+#   NT <- (Tm.rem < 0)*Tm.rem
+#   NTout <- colSums(NT)
+#   order(abs(NTout),decreasing = T)
+#   
+#   #Positive Tout
+#   PT <- (Tm > 0)*Tm
+#   PTout <- colSums(PT)
+#   order(abs(PTout),decreasing = T)
+#   
+#   
+#   Tm[,1],Tm.rem[,1]

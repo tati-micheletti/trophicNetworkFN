@@ -1,0 +1,349 @@
+---
+title: "Analysis Trophic Network Noronha"
+author: "Authors"
+date: '`r Sys.Date()`'
+output:
+  pdf_document: default
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+# Overview
+
+This report computes the total (direct + indirect) effects among species in the Fernando de Noronha food web using dietary interaction data. The workflow:
+
+1. Loads dietary and species data.
+2. Builds the interaction matrix.
+3. Computes the total effects matrix.
+4. Summarises positive and negative effects.
+5. Visualises the interaction network.
+6. Performs a sensitivity analysis for the interaction dependency parameter \(R\).
+
+# Load packages
+
+```{r packages}
+Require::Require("data.table")
+Require::Require("reshape")
+Require::Require("ggplot2")
+Require::Require("cowplot")
+```
+
+# Import data
+
+```{r data}
+psiri <- as.matrix(read.csv("data/psiri.csv", header = TRUE, row.names = 1))
+rawFreq <- as.matrix(read.csv("data/rawFreq.csv", header = TRUE, row.names = 1))
+spp <- read.csv("data/species.csv", header = TRUE)
+```
+
+# Reorder species
+
+```{r reorder}
+ord <- c(
+  'r1', 'r2', 'r3', 'r4', 'r5', 'r6',
+  'm1', 'm2', 'p1', 'p2', 'p3'
+)
+
+psiri <- psiri[ord, ord]
+rawFreq <- rawFreq[ord, ord]
+
+spp <- as.data.table(spp)
+spp[, abr := factor(abr, levels = ord)]
+setkey(spp, "abr")
+
+lookup <- setNames(spp$name, as.character(spp$abr))
+
+rownames(psiri) <- rownames(rawFreq) <- lookup[rownames(psiri)]
+colnames(psiri) <- colnames(rawFreq) <- lookup[colnames(psiri)]
+```
+
+# Build the interaction matrix
+
+The four invasive predators are weighted according to their estimated densities after correcting dietary frequencies by sample size.
+
+```{r interaction-matrix}
+Bw <- rawFreq
+
+samplesInvaders <- c(
+  "felis_catus" = 78,
+  "salvator_merianae" = 22,
+  "rattus_rattus" = 10,
+  "rhinella" = 66
+)
+
+Bw[, names(samplesInvaders)] <-
+  Bw[, names(samplesInvaders)] /
+  matrix(
+    samplesInvaders,
+    ncol = 4,
+    nrow = nrow(rawFreq),
+    byrow = TRUE
+  )
+
+densities <- c(
+  "felis_catus" = 0.71,
+  "salvator_merianae" = 3.98,
+  "rattus_rattus" = 37,
+  "rhinella" = 10.35
+)
+
+Bw[, names(samplesInvaders)] <-
+  Bw[, names(samplesInvaders)] *
+  matrix(
+    densities,
+    ncol = 4,
+    nrow = nrow(rawFreq),
+    byrow = TRUE
+  )
+
+M <- 0.1 * t(psiri)
+M <- M + Bw
+```
+
+# Species interaction dependency
+
+```{r R-values}
+R.vec <- c(
+  invertebrados_ter     = 0.1,
+  invertebrados_aq      = 0.1,
+  rodentia              = 0.5,
+  kerodon_rupestris     = 0.5,
+  birds                 = 0.1,
+  amphisbaena_ridleyi   = 0.2,
+  trachylepis_atlantica = 0.5,
+  rattus_rattus         = 0.8,
+  felis_catus           = 0.8,
+  salvator_merianae     = 0.8,
+  rhinella              = 0.8
+)
+
+stopifnot(setequal(names(R.vec), colnames(M)))
+R.vec <- R.vec[colnames(M)]
+```
+
+# Function to compute total effects
+
+```{r indirect-function}
+indirect <- function(mat, R) {
+
+  stopifnot(is.matrix(mat))
+  stopifnot(nrow(mat) == ncol(mat))
+
+  stopifnot(is.numeric(R))
+  stopifnot(length(R) == nrow(mat))
+
+  stopifnot(!anyNA(mat))
+  stopifnot(!anyNA(R))
+
+  S <- nrow(mat)
+
+  row_totals <- rowSums(mat)
+  stopifnot(all(row_totals > 0))
+
+  W <- mat / row_totals
+
+  consumers <- spp$name[spp$is_consumer]
+  prey <- setdiff(rownames(W), consumers)
+
+  W[prey, consumers] <- -W[prey, consumers]
+
+  P <- diag(R)
+  I <- diag(S)
+
+  Tmat <- solve(I - P %*% W)
+
+  T_no_diag <- Tmat
+  diag(T_no_diag) <- NA
+
+  mean_contribution <- colMeans(T_no_diag, na.rm = TRUE)
+
+  B <- (mat > 0) * 1
+
+  indirect_only <- T_no_diag * (1 - B)
+
+  prop_ind_eff <-
+    sum(indirect_only, na.rm = TRUE) /
+    sum(T_no_diag, na.rm = TRUE)
+
+  prop_ind_eff_tin <-
+    rowSums(indirect_only, na.rm = TRUE) /
+    rowSums(T_no_diag, na.rm = TRUE)
+
+  prop_ind_eff_tout <-
+    colSums(indirect_only, na.rm = TRUE) /
+    colSums(T_no_diag, na.rm = TRUE)
+
+  list(
+    mean_contribution = mean_contribution,
+    prop_ind_eff = prop_ind_eff,
+    prop_ind_eff_tin = prop_ind_eff_tin,
+    prop_ind_eff_tout = prop_ind_eff_tout,
+    direct = P %*% W,
+    Tmat = Tmat
+  )
+}
+```
+
+# Compute total effects
+
+```{r total-effects}
+T.matrix <- indirect(M, R.vec)
+
+Tm <- T.matrix$Tmat
+```
+
+# Positive and negative contributions
+
+```{r summaries}
+NT <- pmin(Tm, 0)
+NTout <- colSums(NT)
+
+PT <- (Tm > 0) * Tm
+PTout <- colSums(PT)
+
+sort(NTout)
+sort(PTout, decreasing = TRUE)
+
+mean(NT)
+```
+
+# Distribution of total effects
+
+```{r histograms-base}
+hist(as.numeric(Tm), col = "darkgrey")
+
+hist(as.numeric(PTout), col = "darkgrey")
+```
+
+# Heat map of total effects
+
+```{r heatmap}
+Tm_plot <- Tm
+diag(Tm_plot) <- NA
+
+df <- as.data.table(as.table(Tm_plot))
+colnames(df) <- c("x", "y", "value")
+
+p1 <- ggplot(
+  df,
+  aes(
+    x = x,
+    y = ordered(y, levels = rev(sort(unique(y)))),
+    fill = value
+  )
+) +
+  geom_tile(color = "black") +
+  scale_fill_gradient2(
+    low = "#FF0000",
+    mid = "#FFFFFF",
+    high = "#87CEFA",
+    n.breaks = 15,
+    limits = c(-0.5, 1),
+    na.value = "lightgrey"
+  ) +
+  coord_fixed() +
+  xlab("") +
+  ylab("")
+
+p1
+```
+
+# Histograms of positive and negative effects
+
+```{r histograms-ggplot}
+df <- data.frame(value = as.numeric(PT))
+
+a <- ggplot(df, aes(x = value)) +
+  geom_histogram(
+    fill = "darkgrey",
+    color = "black"
+  ) +
+  ylim(c(0, 80)) +
+  theme_classic() +
+  xlab("Positive T matrix values") +
+  ylab("Count")
+
+df <- data.frame(value = as.numeric(NT))
+
+b <- ggplot(df, aes(x = value)) +
+  geom_histogram(
+    fill = "darkgrey",
+    color = "black"
+  ) +
+  ylim(c(0, 80)) +
+  theme_classic() +
+  xlab("Negative T matrix values") +
+  ylab("Count")
+
+plot_grid(b, a, labels = c("psiri", "rawFreq"))
+```
+
+# Sensitivity analysis
+
+Species rankings were recomputed after randomly assigning interaction dependency values (\(R\)) 1000 times.
+
+```{r sensitivity}
+r.neg <- numeric(1000)
+r.pos <- numeric(1000)
+
+for(i in seq_len(1000)){
+
+  R.temp <- runif(nrow(psiri))
+
+  Tm.temp <- indirect(M, R.temp)$Tmat
+
+  NT.temp <- (Tm.temp < 0) * Tm.temp
+  PT.temp <- (Tm.temp > 0) * Tm.temp
+
+  NTout.temp <- colSums(NT.temp)
+  PTout.temp <- colSums(PT.temp)
+
+  r.neg[i] <- cor(
+    NTout,
+    NTout.temp,
+    method = "spearman"
+  )
+
+  r.pos[i] <- cor(
+    PTout,
+    PTout.temp,
+    method = "spearman"
+  )
+}
+```
+
+# Sensitivity results
+
+```{r sensitivity-plots}
+par(mfrow = c(1,2))
+
+hist(
+  r.neg,
+  col = "darkgrey",
+  border = "white",
+  xlab = "Correlation coefficient",
+  main = "Negative Tout"
+)
+
+hist(
+  r.pos,
+  col = "darkgrey",
+  border = "white",
+  xlab = "Correlation coefficient",
+  main = "Positive Tout"
+)
+
+mean(r.neg)
+mean(c(r.neg, r.pos))
+```
+

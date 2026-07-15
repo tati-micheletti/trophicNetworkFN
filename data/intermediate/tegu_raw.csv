@@ -1,0 +1,44 @@
+"","sample_id","predator","prey","count","volume_ml"
+"1","TMFN 122","Salvator_merianae","Mamífero",1,0.327
+"2","TMFN 164","Salvator_merianae","Mamífero",1,2.018
+"3","TMFN 163","Salvator_merianae","Roedor",1,2.5
+"4","TMFN 108","Salvator_merianae","Rattus sp",1,5
+"5","TMFN 162","Salvator_merianae","Rattus sp",1,1.8
+"6","TMFN 113","Salvator_merianae","Kerodon",1,9
+"7","TMFN 151","Salvator_merianae","Mus musculus",2,32
+"8","TMFN 15","Salvator_merianae","Trachylepis",1,4.7
+"9","TMFN 19","Salvator_merianae","Trachylepis",1,0.525
+"10","TMFN 29","Salvator_merianae","Trachylepis",1,7.4
+"11","TMFN 122","Salvator_merianae","Trachylepis",1,0.025
+"12","TMFN 150","Salvator_merianae","Trachylepis",1,5
+"13","TMFN 153","Salvator_merianae","Trachylepis",1,1.025
+"14","TMFN 164","Salvator_merianae","Trachylepis",1,0.048
+"15","TMFN 41","Salvator_merianae","Amphisbaena",1,0.72
+"16","TMFN 116","Salvator_merianae","Caranguejo",1,1.6
+"17","TMFN 165","Salvator_merianae","Caranguejo",1,5
+"18","TMFN 164","Salvator_merianae","Vegetal",1,0.075
+"19","TMFN 29","Salvator_merianae","Seriguela",1,1
+"20","TMFN 108","Salvator_merianae","Seriguela",1,8
+"21","TMFN 113","Salvator_merianae","Seriguela",2,3
+"22","TMFN 116","Salvator_merianae","Seriguela",1,4
+"23","TMFN 122","Salvator_merianae","Abacaxi",1,2.512
+"24","TMFN 131","Salvator_merianae","Abacaxi",1,22
+"25","TMFN 160","Salvator_merianae","Banana",1,19
+"26","TMFN 153","Salvator_merianae","Melancia",1,1.89
+"27","TMFN 105","Salvator_merianae","Caju",1,35
+"28","TMFN 165","Salvator_merianae","Caju",1,32
+"29","TMFN 122","Salvator_merianae","Fruta",4,0.043
+"30","TMFN 122","Salvator_merianae","Semente",1,0.65
+"31","TMFN 128","Salvator_merianae","Semente",1,1.5
+"32","TMFN 161","Salvator_merianae","Semente",1,0.8
+"33","TMFN 162","Salvator_merianae","Semente",1,0.05
+"34","TMFN 163","Salvator_merianae","Semente",1,0.12
+"35","TMFN 140","Salvator_merianae","Inseto",1,0.125
+"36","TMFN 162","Salvator_merianae","Inseto",1,0.15
+"37","TMFN 122","Salvator_merianae","Homoptera",2,0.075
+"38","TMFN 163","Salvator_merianae","Blatodea",1,0.115
+"39","TMFN 164","Salvator_merianae","Blatodea",1,0.2
+"40","TMFN 122","Salvator_merianae","Unknown",1,0.1
+"41","TMFN 128","Salvator_merianae","Unknown",1,0.2
+"42","TMFN 140","Salvator_merianae","Unknown",1,0.095
+"43","TMFN 152","Salvator_merianae","Unknown",1,0.4
