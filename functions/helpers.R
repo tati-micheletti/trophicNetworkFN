@@ -285,3 +285,106 @@ calculate_effect_matrix <- function(mat, R) {
   return(finalList)
 }
 
+###############################################################################
+## Generic scenario function
+###############################################################################
+
+simulate_management_scenario <- function(
+    effect_matrix,
+    response_strength,
+    modifications){
+  
+  scenario_matrix <- effect_matrix
+  
+  ## -------------------------------------------------------------------------
+  ## Apply all requested modifications
+  ##
+  ## modifications must contain:
+  ##
+  ## source     = species exerting the effect (column)
+  ## target     = species receiving the effect (row)
+  ## reduction  = proportion removed (0–1)
+  ##
+  ## If target = NA, all outgoing interactions from source are modified.
+  ## -------------------------------------------------------------------------
+  
+  for(i in seq_len(nrow(modifications))){
+    
+    source <-
+      modifications$source[i]
+    
+    target <-
+      modifications$target[i]
+    
+    reduction <-
+      modifications$reduction[i]
+    
+    if(is.na(target)){
+      
+      scenario_matrix[, source] <-
+        scenario_matrix[, source] *
+        (1 - reduction)
+      
+    }else{
+      
+      scenario_matrix[target, source] <-
+        scenario_matrix[target, source] *
+        (1 - reduction)
+      
+    }
+    
+  }
+  
+  ## -------------------------------------------------------------------------
+  ## Recalculate network
+  ## -------------------------------------------------------------------------
+  
+  scenario_results <-
+    calculate_effect_matrix(
+      mat = scenario_matrix,
+      R   = response_strength
+    )
+  
+  delta_total_effect_matrix <-
+    scenario_results$total_effect_matrix -
+    baseline_total_effect_matrix
+  
+  delta_mean_total_effect <-
+    scenario_results$mean_total_effect -
+    baseline_mean_total_effect
+  
+  sign_changes <-
+    sum(
+      sign(baseline_total_effect_matrix) !=
+        sign(scenario_results$total_effect_matrix),
+      na.rm = TRUE
+    )
+  
+  list(
+    
+    scenario_matrix = scenario_matrix,
+    
+    results = scenario_results,
+    
+    delta_total_effect_matrix =
+      delta_total_effect_matrix,
+    
+    delta_mean_total_effect =
+      delta_mean_total_effect,
+    
+    sign_changes = sign_changes,
+    
+    winners =
+      sort(
+        delta_mean_total_effect,
+        decreasing = TRUE
+      ),
+    
+    losers =
+      sort(
+        delta_mean_total_effect
+      )
+    
+  )
+  
+}
