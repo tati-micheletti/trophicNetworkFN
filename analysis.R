@@ -6,6 +6,10 @@
 ## 1. Load packages
 ###############################################################################
 
+if(!require("Require")){
+  install.packages("Require")
+}
+library("Require")
 Require::Require("readxl")
 Require::Require("data.table")
 Require::Require("igraph")
