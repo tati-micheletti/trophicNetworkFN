@@ -1,0 +1,1202 @@
+---
+title: "Invasive Species Food Web Analysis — Fernando de Noronha"
+author: "Micheletti and Gaiotto et al. 2026"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: '3'
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    theme: flatly
+    code_folding: show
+subtitle: Diet reconstruction, interaction network, indirect effects, and management
+  scenarios
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = TRUE,
+  message = FALSE,
+  fig.width = 9,
+  fig.height = 7
+)
+```
+
+# Overview
+
+This notebook reconstructs the predator–prey food web for four invasive/focal
+consumers on Fernando de Noronha — feral cats (*Felis catus*), rats
+(*Rattus* spp.), tegu lizards (*Salvator merianae*), and cane toads
+(*Rhinella jimi*) — and evaluates how their removal (individually or in
+combination) propagates through the food web via direct and indirect effects.
+
+The workflow has four main stages:
+
+1. **Taxonomic reconstruction** — harmonize raw diet records into a common
+   set of prey categories and calculate the Index of Relative Importance
+   (IRI) for each predator's diet.
+2. **Network construction** — combine diet composition (IRI) with predator
+   density and sampling effort to build top-down (predator → prey) and
+   bottom-up (prey → predator) interaction matrices, and visualize the
+   resulting food web.
+3. **Indirect effects** — use a total-effects matrix formalism (`indirect()`
+   / `calculate_effect_matrix()`) to propagate direct interactions into
+   whole-network (direct + indirect) effects, together with a sensitivity
+   analysis of the species' response-strength parameters.
+4. **Management scenarios** — simulate partial to complete removal of one or
+   more invasive predators (with and without diet redistribution among the
+   remaining predators) and quantify the predicted consequences for two
+   endemic species of particular conservation concern (the skink
+   *Trachylepis atlantica* and the amphisbaenian *Amphisbaena ridleyi*) and
+   for the native rodent *Kerodon rupestris*.
+
+All figures and tables are written to the `outputs/` folder at the end of
+the notebook.
+
+---
+
+# Part I — Taxonomic reconstruction
+
+## 1. Load packages
+
+We use `Require::Require()` so that packages are installed automatically if
+missing, which keeps the analysis reproducible across machines/collaborators.
+
+```{r load-packages}
+if (!require("Require")) {
+  install.packages("Require")
+}
+library("Require")
+
+Require::Require("readxl")   # read the raw Excel workbook
+Require::Require("data.table") # fast, concise data wrangling
+Require::Require("igraph")   # graph object underlying the food web
+Require::Require("ggraph")   # ggplot2-style network plotting
+Require::Require("ggplot2")  # all other plots (heatmaps, bar charts, etc.)
+Require::Require("reshape2") # melt() for heatmap-ready long format
+```
+
+## 2. Read input workbook and create output directory
+
+All raw data live in a single Excel workbook (`data/foodwebData.xlsx`), with
+one sheet per predator (`cats`, `rats`, `tegu`, `toads`) plus supporting
+sheets (`mapping`, `species_parameters`, `weighting`).
+
+```{r read-data}
+input_file <- "data/foodwebData.xlsx"
+sheet_names <- excel_sheets(input_file)
+
+sheets <- lapply(sheet_names, function(x) {
+  as.data.table(read_excel(input_file, sheet = x))
+})
+names(sheets) <- sheet_names
+
+mapping             <- copy(sheets$mapping)
+species_parameters  <- copy(sheets$species_parameters)
+weighting           <- copy(sheets$weighting)
+cats  <- copy(sheets$cats)
+rats  <- copy(sheets$rats)
+tegu  <- copy(sheets$tegu)
+toads <- copy(sheets$toads)
+
+# Toads require one extra derived column: estimated prey volume
+# (mean volume per item x number of items), since toad diet data was
+# recorded as counts + mean item volume rather than a single volume figure.
+toads[, volume_ml := mean_volume_mL_V * count_N]
+
+dir.create("outputs", showWarnings = FALSE)
+```
+
+## 3. Source helper functions
+
+Custom functions for taxonomy harmonization, diet aggregation, IRI
+calculation, the total-effects formalism, and management-scenario
+simulation all live in `functions/helpers.R`.
+
+```{r source-helpers}
+source("functions/helpers.R")
+```
+
+## 4. Harmonize prey names
+
+Raw diet items are recorded at inconsistent taxonomic resolutions across
+predators (e.g. species-level vs. broad categories). `harmonize_taxonomy()`
+maps every raw prey name onto a common set of ecological categories, using
+the `mapping` sheet as a lookup table.
+
+**Notes for co-authors editing the mapping table:**
+
+- To **remove** a diet item entirely, set `Keep = FALSE` for that row in the
+  `mapping` sheet and re-run the pipeline from the start.
+- To **change how items are grouped**, add a new column to `mapping` and
+  point `finalNaming` at it (we currently use the `Ecological_Group`
+  column, referenced here as `"Ecological"`).
+- **Caution:** the same raw name can appear in multiple candidate groupings.
+  If you need to exclude an item from just one grouping scheme, add a
+  slightly renamed duplicate row for that scheme (with `Keep = TRUE`) rather
+  than editing the shared name, to avoid unintentionally removing it from
+  other groupings too.
+
+```{r harmonize-taxonomy}
+cats  <- harmonize_taxonomy(cats,  mapping, finalNaming = "Ecological")
+rats  <- harmonize_taxonomy(rats,  mapping, finalNaming = "Ecological")
+tegu  <- harmonize_taxonomy(tegu,  mapping, finalNaming = "Ecological")
+toads <- harmonize_taxonomy(toads, mapping, finalNaming = "Ecological")
+```
+
+## 5. Aggregate prey types
+
+Diet records are aggregated per sample (where sample-level data exist) so
+that later frequency/occurrence-based metrics (e.g. IRI) are calculated
+correctly rather than being inflated by multiple rows per individual.
+
+```{r aggregate-diet}
+cats  <- aggregate_raw_diet(cats,  predator = "cats")
+rats  <- aggregate_raw_diet(rats,  predator = "rats")
+tegu  <- aggregate_raw_diet(tegu,  predator = "tegu")
+toads <- aggregate_raw_diet(toads, predator = "toads")
+```
+
+## 6. Calculate Index of Relative Importance (IRI) for all predators
+
+IRI combines the numeric, frequency, and volumetric/weight contribution of
+each prey category to a predator's diet into a single importance score,
+expressed here as `percent_IRI`. Toads use a fixed stomach sample size
+(`n_stomachs = 137`) since their raw data were already summarized; the other
+three predators use per-individual raw records (`rawData = TRUE`).
+
+```{r calc-iri}
+toads_iri <- calculate_iri(diet_data = toads, n_stomachs = 137, rawData = FALSE)
+cats_iri  <- calculate_iri(diet_data = cats,  rawData = TRUE)
+rats_iri  <- calculate_iri(diet_data = rats,  rawData = TRUE)
+tegu_iri  <- calculate_iri(diet_data = tegu,  rawData = TRUE)
+```
+
+## 7. Combine predator diets into a single diet-network table
+
+```{r combine-diets}
+cats_iri[,  predator := "Felis_catus"]
+rats_iri[,  predator := "Rattus_spp"]
+tegu_iri[,  predator := "Salvator_merianae"]
+toads_iri[, predator := "Rhinella"]
+
+diet_network <- rbindlist(
+  list(cats_iri, rats_iri, tegu_iri, toads_iri),
+  use.names = TRUE
+)
+```
+
+---
+
+# Part III — Final interaction table
+
+We keep only the columns needed downstream (predator, prey, and interaction
+strength = %IRI), and sort so the strongest diet links appear first within
+each predator — useful for a quick sanity check of the diet data.
+
+```{r final-diet-network}
+diet_network <- diet_network[, .(
+  predator,
+  prey,
+  interaction_strength = percent_IRI
+)]
+
+setorder(diet_network, predator, -interaction_strength)
+```
+
+## 8. Density-weighted predator consumption
+
+IRI describes diet **composition** (i.e., relative importance of prey
+within a predator's diet) and is used below for **prey → predator**
+(bottom-up) effects. To estimate actual **predation pressure on the
+landscape** (top-down effects), we additionally need the number of
+individuals of each prey consumed per predator, corrected for sampling
+effort and then weighted by predator population density — since a predator
+with high per-capita consumption but very low density may exert weaker
+top-down pressure than a less selective but much denser predator.
+
+Density and sample-size values are taken from published estimates for
+Fernando de Noronha and are documented inline below with citations.
+
+```{r consumption-inputs}
+## Number of stomachs/samples analysed per predator
+samples <- c(
+  Felis_catus       = 78,  # cats (n = 78), Gaiotto et al. 2020
+  Salvator_merianae = 22,  # tegu (n = 22), Gaiotto et al. 2020
+  Rattus_spp        = 10,  # rats (n = 10), Gaiotto et al. 2020
+  Rhinella          = 137  # individual toad samples collected for this study
+)
+
+## Predator densities (individuals / ha)
+densities <- c(
+  Felis_catus       = 0.71,  # feral cats, Dias et al. 2017
+  Salvator_merianae = 3.98,  # tegu, Abrahão et al. 2019
+  Rattus_spp        = 37,    # rats, Russell et al. 2018
+  Rhinella          = 10.35  # toads, extrapolated from Solomon Islands, Pikacha et al. 2015
+)
+```
+
+```{r consumption-matrix}
+predator_consumption <- rbindlist(list(
+  cats_iri[,  .(predator = "Felis_catus",       prey, N)],
+  rats_iri[,  .(predator = "Rattus_spp",        prey, N)],
+  tegu_iri[,  .(predator = "Salvator_merianae", prey, N)],
+  toads_iri[, .(predator = "Rhinella",          prey, N)]
+))
+
+## Build prey x predator consumption matrix (counts)
+predator_consumption <- as.data.table(dcast(
+  predator_consumption,
+  prey ~ predator,
+  value.var = "N",
+  fill = 0
+))
+
+## Convert raw counts to per-predator (per-sample) consumption rate
+predator_consumption[, names(samples) := Map(`/`, .SD, samples),
+                      .SDcols = names(samples)]
+
+## Weight per-predator consumption by predator density, giving an estimate
+## of population-level predation pressure per unit area
+predator_consumption[, names(densities) := Map(`*`, .SD, densities),
+                      .SDcols = names(densities)]
+
+## Keep prey as the first column for readability
+setcolorder(predator_consumption, c("prey", names(samples)))
+```
+
+## 8b. Build the predator → prey interaction matrix
+
+All species that appear either as prey or as a predator become nodes of the
+food web (`network_species`). We then build a square matrix where rows are
+prey and columns are predators, filled with density-weighted consumption
+values (i.e., **top-down pressure**).
+
+```{r network-species}
+network_species <- sort(unique(c(
+  predator_consumption$prey,
+  predator_consumption |> names() |> setdiff("prey")
+)))
+
+predator_prey_matrix <- matrix(
+  0,
+  nrow = length(network_species),
+  ncol = length(network_species),
+  dimnames = list(network_species, network_species)
+)
+
+for (i in seq_len(nrow(predator_consumption))) {
+  prey <- predator_consumption$prey[i]
+  for (predator in names(samples)) {
+    predator_prey_matrix[prey, predator] <- predator_consumption[i, get(predator)]
+  }
+}
+
+# Sanity checks: every prey / predator name used to fill the matrix must
+# actually exist among its row/column names, or the fill step above would
+# have silently failed.
+stopifnot(all(predator_consumption[, prey] %in% rownames(predator_prey_matrix)))
+stopifnot(names(samples) %in% colnames(predator_prey_matrix))
+```
+
+## 9. Normalized resource-dependency matrix (bottom-up effects)
+
+This matrix captures **prey → predator** dependency: how much each predator
+relies on each prey item, expressed as a proportion of that predator's total
+diet (i.e., IRI values re-scaled to sum to 1 within each predator). Rows are
+consumers (predators), columns are resources (prey) — this reproduces the
+orientation of `t(psiri)` in the original model this pipeline is based on.
+
+```{r resource-dependency-matrix}
+resource_dependency_matrix <- matrix(
+  0,
+  nrow = length(network_species),
+  ncol = length(network_species),
+  dimnames = list(network_species, network_species)
+)
+
+## Relative diet composition per predator (sums to 1 within each predator)
+diet_network[, dependency := interaction_strength / sum(interaction_strength),
+             by = predator]
+
+for (i in seq_len(nrow(diet_network))) {
+  resource_dependency_matrix[
+    diet_network$predator[i],
+    diet_network$prey[i]
+  ] <- diet_network$dependency[i]
+}
+```
+
+## 10. Species response parameters
+
+`species_parameters` (from the workbook) holds each species' node label,
+trophic group (used for plotting), and its **response strength** — a
+species-specific scalar describing how strongly a species reacts to
+pressure from the network, used in the effect-propagation model below.
+
+```{r species-parameters}
+## Every network species must have matching parameters, or the model
+## cannot be evaluated for it.
+missing_species <- setdiff(network_species, species_parameters$species)
+
+if (length(missing_species) > 0) {
+  stop("Missing parameters for: ", paste(missing_species, collapse = ", "))
+}
+
+## Order parameters to match the network's species order
+setkey(species_parameters, species)
+species_parameters <- species_parameters[network_species]
+
+response_strength <- species_parameters$response_strength
+names(response_strength) <- species_parameters$species
+```
+
+## 11. Assemble food-web model inputs
+
+```{r foodweb-model-list}
+foodweb_model <- list(
+  species                     = network_species,
+  predator_prey_matrix        = predator_prey_matrix,       # top-down
+  resource_dependency_matrix  = resource_dependency_matrix, # bottom-up
+  response_strength           = response_strength,
+  predator_densities          = densities,
+  predator_samples            = samples
+)
+```
+
+---
+
+# Part II — Food-web visualization
+
+## 14. Visualize the food web
+
+Nodes carry a display `label` and `trophic_group` (for point colour);
+edges are the predator–prey diet links from `diet_network`, with edge width
+mapped to interaction strength (%IRI).
+
+```{r build-graph}
+nodes <- data.table(name = network_species)
+
+nodes <- merge(
+  nodes,
+  species_parameters[, .(species, label, trophic_group)],
+  by.x = "name",
+  by.y = "species",
+  all.x = TRUE
+)
+
+edges <- copy(diet_network)
+setnames(edges, c("prey", "predator"), c("from", "to"))
+
+foodweb_graph <- graph_from_data_frame(
+  d = edges,
+  vertices = nodes,
+  directed = TRUE
+)
+```
+
+```{r plot-foodweb, fig.cap="Food web of the four focal predators and their prey on Fernando de Noronha. Edge width = interaction strength (%IRI); node colour = trophic group."}
+foodweb_plot <- ggraph(foodweb_graph, layout = "stress") +
+
+  geom_edge_link(
+    aes(width = interaction_strength),
+    alpha = 0.7,
+    colour = "grey40",
+    end_cap = circle(5, "mm"),
+    start_cap = circle(5, "mm"),
+    arrow = arrow(length = unit(3.5, "mm"), type = "closed")
+  ) +
+
+  geom_node_point(
+    aes(fill = trophic_group),
+    shape = 21,
+    size = 6,
+    colour = "black",
+    stroke = 0.4
+  ) +
+
+  geom_node_text(
+    aes(label = label),
+    repel = TRUE,
+    size = 3.8,
+    point.padding = unit(0.5, "lines"),
+    box.padding = unit(0.7, "lines")
+  ) +
+
+  scale_edge_width(range = c(0.2, 2.8)) +
+
+  # base_family = "sans" avoids "font family not found in Windows font
+  # database" warnings from theme_graph() on Windows machines.
+  theme_graph(base_family = "sans")
+
+foodweb_plot
+```
+
+---
+
+# Part IV — Direct and indirect effects
+
+## 15. Build the direct-interaction matrices
+
+We now assemble the two matrices that feed the total-effects model:
+top-down predation effects and bottom-up resource-dependency effects, and
+confirm they share identical species ordering (required for matrix algebra
+downstream).
+
+```{r direct-matrices}
+predation_matrix    <- copy(predator_prey_matrix)       # top-down
+resource_dep_matrix <- copy(resource_dependency_matrix) # bottom-up
+response_strength   <- response_strength
+
+stopifnot(identical(rownames(predation_matrix), rownames(resource_dep_matrix)))
+stopifnot(identical(colnames(predation_matrix), colnames(resource_dep_matrix)))
+stopifnot(identical(rownames(predation_matrix), names(response_strength)))
+```
+
+## 16. Build the combined direct-effect matrix
+
+Species are reordered into a fixed, ecologically meaningful sequence
+(`network_order`, native/endemic species first, then invasive predators)
+so that all downstream matrices and plots use a consistent, readable
+ordering.
+
+```{r reorder-species}
+predator_effect_matrix <- copy(predator_prey_matrix) # analogous to Bw (top-down)
+
+# psiri (the original diet-composition matrix) had prey columns first and
+# predators last; we standardize row/column order here to network_order so
+# top-down and bottom-up matrices line up correctly for addition below.
+network_order <- c(
+  "Amphisbaena_ridleyi",
+  "Aquatic_invertebrates",
+  "Birds",
+  "Fish",
+  "Kerodon_rupestris",
+  "Mammals",
+  "Mus_musculus",
+  "Plants",
+  "Reptiles",
+  "Terrestrial_invertebrates",
+  "Trachylepis_atlantica",
+  "Rhinella",
+  "Rattus_spp",
+  "Salvator_merianae",
+  "Felis_catus"
+)
+
+stopifnot(setequal(network_order, rownames(predator_prey_matrix)))
+stopifnot(setequal(network_order, rownames(resource_dependency_matrix)))
+
+predator_effect_matrix     <- predator_effect_matrix[network_order, network_order]
+resource_dependency_matrix <- resource_dependency_matrix[network_order, network_order]
+response_strength          <- response_strength[network_order]
+```
+
+```{r resource-effect-matrix}
+## Bottom-up direct effects, analogous to M = 0.1 * t(psiri) in the
+## original model (psiri was expressed in %).
+## IMPORTANT: resource_dependency_matrix here is ALREADY transposed
+## relative to psiri, i.e. t(psiri) ~ resource_dependency_matrix / 100.
+## We therefore multiply by 100 (to undo the earlier /100 normalization)
+## and then by 0.1 (the model's bottom-up scaling constant), WITHOUT an
+## additional transpose.
+resource_effect_matrix <- 0.1 * 100 * resource_dependency_matrix
+```
+
+```{r combine-effects}
+## Optional relative weighting of top-down vs. bottom-up processes.
+## Currently both are unweighted (weight = 1); the commented-out lines
+## show how weights could instead be read from the workbook's
+## `weighting` sheet if we later want to explore that sensitivity.
+
+# predation_weight <- weighting[parameter == "predation_weight", value]
+# resource_weight  <- weighting[parameter == "resource_weight", value]
+predation_weight <- 1
+resource_weight  <- 1
+
+# Combined direct-effect matrix: M <- M + Bw
+effects_Matrix <- (predation_weight * predator_effect_matrix) +
+                   (resource_weight  * resource_effect_matrix)
+```
+
+## 17. Calculate total (direct + indirect) effects
+
+`calculate_effect_matrix()` implements the total-effects matrix formalism
+(built around the `indirect()` function), propagating each species'
+response strength through the direct-effect matrix to yield direct and
+total (direct + indirect) effect matrices for every species pair.
+
+```{r total-effects}
+effect_results <- calculate_effect_matrix(
+  mat = effects_Matrix,
+  R = response_strength
+)
+```
+
+## 18. Visualize network effects
+
+Diagonal values (self-effects) are set to `NA` before plotting, since they
+are not ecologically meaningful for a species-pair heatmap.
+
+```{r effect-matrices}
+total_effect_matrix <- effect_results$total_effect_matrix
+diag(total_effect_matrix) <- NA
+
+direct_effect_matrix <- effect_results$direct_effect_matrix
+diag(direct_effect_matrix) <- NA
+```
+
+### Positive vs. negative effects and species rankings
+
+We split total effects into their positive and negative components and sum
+across each acting species, to identify which species have the strongest
+net-positive vs. net-negative influence on the rest of the network.
+
+```{r effect-rankings}
+positive_effect_matrix <- pmax(total_effect_matrix, 0)
+negative_effect_matrix <- pmin(total_effect_matrix, 0)
+
+positive_effect_out <- colSums(positive_effect_matrix, na.rm = TRUE)
+negative_effect_out <- colSums(negative_effect_matrix, na.rm = TRUE)
+
+positive_effect_ranking <- data.frame(
+  species = names(sort(positive_effect_out, decreasing = TRUE)),
+  total_positive_effect = sort(positive_effect_out, decreasing = TRUE)
+)
+
+negative_effect_ranking <- data.frame(
+  species = names(sort(negative_effect_out)),
+  total_negative_effect = sort(negative_effect_out)
+)
+```
+
+### Heatmaps of direct and total effects
+
+```{r effect-heatmaps, fig.cap="Direct vs. total (direct + indirect) effect matrices among network species. Blue = positive effect, red = negative effect."}
+total_effect_heatmap <- ggplot(
+  melt(total_effect_matrix),
+  aes(Var2, factor(Var1, levels = rev(rownames(total_effect_matrix))), fill = value)
+) +
+  geom_tile(color = "grey90") +
+  scale_fill_gradient2(
+    low = "#B2182B", mid = "white", high = "#2166AC",
+    midpoint = 0, na.value = "grey90"
+  ) +
+  coord_fixed() +
+  labs(x = "Acting species", y = "Affected species", fill = "Total effect") +
+  theme_bw() +
+  theme(panel.grid = element_blank(), axis.text.x = element_text(angle = 45, hjust = 1))
+
+direct_effect_heatmap <- ggplot(
+  melt(direct_effect_matrix),
+  aes(Var2, factor(Var1, levels = rev(rownames(direct_effect_matrix))), fill = value)
+) +
+  geom_tile(color = "grey90") +
+  scale_fill_gradient2(
+    low = "#B2182B", mid = "white", high = "#2166AC",
+    midpoint = 0, na.value = "grey90"
+  ) +
+  coord_fixed() +
+  labs(x = "Acting species", y = "Affected species", fill = "Direct effect") +
+  theme_bw() +
+  theme(panel.grid = element_blank(), axis.text.x = element_text(angle = 45, hjust = 1))
+
+total_effect_heatmap
+direct_effect_heatmap
+```
+
+---
+
+# Part V — Sensitivity analysis
+
+We evaluate how robust the total-effects ranking is to uncertainty in the
+species response-strength parameter (`R`), by resampling `R` within ±20% of
+its point estimate (bounded to [0, 1]) across `r n_simulations <- 5000; n_simulations` simulations, and
+comparing each simulation's ranking of species influence to the baseline
+ranking (Spearman correlation, top-1 species, and top-5 species set).
+
+```{r sensitivity-setup}
+n_simulations <- 5000
+
+baseline_effects <- effect_results$mean_total_effect
+baseline_ranking <- names(sort(baseline_effects, decreasing = TRUE))
+
+spearman_correlations <- numeric(n_simulations)
+top1_species <- character(n_simulations)
+top5_species <- vector(mode = "list", length = n_simulations)
+ranking_identical <- numeric(n_simulations)
+```
+
+```{r sensitivity-loop}
+for (i in seq_len(n_simulations)) {
+
+  ## Perturb response strengths by +/-20%, keeping values within [0, 1]
+  response_strength_temp <- response_strength *
+    runif(length(response_strength), min = 0.8, max = 1.2)
+
+  response_strength_temp <- pmin(1, pmax(0, response_strength_temp))
+  names(response_strength_temp) <- names(response_strength)
+  response_strength_temp <- response_strength_temp[rownames(direct_effect_matrix)]
+
+  ## Recalculate total effects with the perturbed response strengths
+  effect_results_temp <- calculate_effect_matrix(
+    mat = effects_Matrix,
+    R   = response_strength_temp
+  )
+
+  temp_effects <- effect_results_temp$mean_total_effect
+
+  ## Compare this simulation's ranking to the baseline ranking
+  spearman_correlations[i] <- cor(baseline_effects, temp_effects, method = "spearman")
+
+  ranking <- names(sort(temp_effects, decreasing = TRUE))
+  top1_species[i] <- ranking[1]
+  top5_species[[i]] <- ranking[1:5]
+
+  ranking_identical[i] <- identical(ranking, baseline_ranking)
+}
+```
+
+## Summary statistics
+
+```{r sensitivity-summary}
+sensitivity_summary <- data.frame(
+  statistic = c(
+    "Mean Spearman correlation",
+    "Median Spearman correlation",
+    "Minimum Spearman correlation",
+    "Maximum Spearman correlation",
+    "Proportion of identical rankings"
+  ),
+  value = c(
+    mean(spearman_correlations),
+    median(spearman_correlations),
+    min(spearman_correlations),
+    max(spearman_correlations),
+    mean(ranking_identical)
+  )
+)
+
+sensitivity_summary
+```
+
+## Rank-1 and top-5 stability across simulations
+
+```{r rank-stability}
+top_rank_stability <- sort(prop.table(table(top1_species)), decreasing = TRUE)
+top_rank_stability <- data.frame(
+  species = names(top_rank_stability),
+  proportion_top1 = as.numeric(top_rank_stability)
+)
+
+top5_stability <- sapply(names(baseline_effects), function(sp) {
+  mean(sapply(top5_species, function(x) sp %in% x))
+})
+top5_stability <- sort(top5_stability, decreasing = TRUE)
+top5_stability <- data.frame(
+  species = names(top5_stability),
+  proportion_top5 = top5_stability
+)
+```
+
+```{r sensitivity-plots, fig.cap="Left: distribution of Spearman correlations between baseline and perturbed species rankings across 5,000 simulations. Right: proportion of simulations in which each species ranked among the five most influential."}
+response_strength_sensitivity_plot <- ggplot(
+  data.frame(correlation = spearman_correlations), aes(correlation)
+) +
+  geom_histogram(bins = 30, fill = "grey70", colour = "black") +
+  theme_classic() +
+  xlab("Spearman correlation with baseline species ranking") +
+  ylab("Number of simulations") +
+  ggtitle("Robustness of species rankings to uncertainty in response strengths")
+
+plot_top5_stability <- ggplot(
+  top5_stability, aes(x = reorder(species, proportion_top5), y = proportion_top5)
+) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  scale_y_continuous(limits = c(0, 1), expand = c(0, 0)) +
+  labs(
+    title = "Top-5 ranking stability",
+    subtitle = "Proportion of simulations in which each species ranked among the five most influential",
+    x = NULL, y = "Proportion of simulations"
+  ) +
+  theme_bw()
+
+response_strength_sensitivity_plot
+plot_top5_stability
+```
+
+---
+
+# Part VI — Management scenarios
+
+## 20. Baseline
+
+```{r baseline-management}
+baseline_results <- effect_results
+baseline_total_effect_matrix <- baseline_results$total_effect_matrix
+baseline_mean_total_effect <- baseline_results$mean_total_effect
+```
+
+## Define management scenarios
+
+We simulate:
+
+- **Single-predator reductions** at five intensities (25%, 50%, 75%, 90%,
+  ~100%) for each of the four focal predators.
+- **Combined eradications** of two or more predators simultaneously
+  (cats + rats; cats + tegu; all four invasive species).
+
+```{r define-scenarios}
+management_scenarios <- list()
+
+managed_predators <- c("Felis_catus", "Rattus_spp", "Salvator_merianae", "Rhinella")
+management_levels <- c(0.25, 0.50, 0.75, 0.90, 0.9999)
+
+for (predator in managed_predators) {
+  for (level in management_levels) {
+    scenario_name <- paste0(predator, "_", round(level * 100), "percent")
+    management_scenarios[[scenario_name]] <- data.frame(
+      source = predator,
+      target = NA,
+      reduction = level,
+      stringsAsFactors = FALSE
+    )
+  }
+}
+
+management_scenarios[["Cats_and_Rats"]] <- data.frame(
+  source = c("Felis_catus", "Rattus_spp"), target = NA, reduction = 0.9999
+)
+
+management_scenarios[["Cats_and_Tegu"]] <- data.frame(
+  source = c("Felis_catus", "Salvator_merianae"), target = NA, reduction = 0.9999
+)
+
+management_scenarios[["All_Invasive"]] <- data.frame(
+  source = c("Felis_catus", "Rattus_spp", "Salvator_merianae", "Rhinella"),
+  target = NA, reduction = 0.9999
+)
+```
+
+## Run all scenarios
+
+Each scenario is run twice: once with prey redistribution among remaining
+predators disabled (`redistribution = "none"`) and once with it enabled
+(`redistribution = "predator_diet"`, the behavioural assumption that
+surviving predators shift their diet toward remaining resources). The
+`"predator_diet"` version (`management_results`) is what we use for the
+main figures; the `"none"` version is used only for the sensitivity
+comparison below.
+
+```{r run-scenarios}
+management_results <- list()
+for (name in names(management_scenarios)) {
+  management_results[[name]] <- simulate_management_scenario(
+    effect_matrix = effects_Matrix,
+    response_strength = response_strength,
+    modifications = management_scenarios[[name]],
+    redistribution = "predator_diet"
+  )
+}
+
+management_results_none <- list()
+for (name in names(management_scenarios)) {
+  management_results_none[[name]] <- simulate_management_scenario(
+    effect_matrix = effects_Matrix,
+    response_strength = response_strength,
+    modifications = management_scenarios[[name]],
+    redistribution = "none"
+  )
+}
+
+management_results_diet <- list()
+for (name in names(management_scenarios)) {
+  management_results_diet[[name]] <- simulate_management_scenario(
+    effect_matrix = effects_Matrix,
+    response_strength = response_strength,
+    modifications = management_scenarios[[name]],
+    redistribution = "predator_diet"
+  )
+}
+```
+
+## Sensitivity to the diet-redistribution assumption (focus: *Trachylepis atlantica*)
+
+Because the behavioural assumption of prey redistribution among surviving
+predators could plausibly affect predictions for the endemic skink
+*Trachylepis atlantica*, we compare its predicted response with vs. without
+redistribution across all scenarios.
+
+```{r trachylepis-comparison}
+comparison_trachylepis <- data.frame(
+  scenario = names(management_scenarios),
+  no_redistribution = sapply(
+    management_results_none,
+    function(x) x$delta_mean_total_effect["Trachylepis_atlantica"]
+  ),
+  predator_redistribution = sapply(
+    management_results_diet,
+    function(x) x$delta_mean_total_effect["Trachylepis_atlantica"]
+  )
+)
+
+comparison_trachylepis$difference <-
+  comparison_trachylepis$predator_redistribution -
+  comparison_trachylepis$no_redistribution
+```
+
+```{r comparison-summary}
+comparison_summary <- data.frame(
+  scenario = names(management_scenarios),
+
+  rank_correlation = sapply(names(management_scenarios), function(name) {
+    cor(
+      management_results_none[[name]]$delta_mean_total_effect,
+      management_results_diet[[name]]$delta_mean_total_effect,
+      method = "spearman"
+    )
+  }),
+
+  mean_absolute_difference = sapply(names(management_scenarios), function(name) {
+    mean(abs(
+      management_results_none[[name]]$delta_mean_total_effect -
+        management_results_diet[[name]]$delta_mean_total_effect
+    ))
+  }),
+
+  max_absolute_difference = sapply(names(management_scenarios), function(name) {
+    max(abs(
+      management_results_none[[name]]$delta_mean_total_effect -
+        management_results_diet[[name]]$delta_mean_total_effect
+    ))
+  })
+)
+
+comparison_summary
+```
+
+```{r comparison-plot, fig.cap="Predicted change in total effect on Trachylepis atlantica under each management scenario, with vs. without diet redistribution among surviving predators. Points near the dashed 1:1 line indicate the redistribution assumption has little influence on this species' predicted response."}
+comparison_plot <- ggplot(
+  comparison_trachylepis, aes(no_redistribution, predator_redistribution)
+) +
+  geom_abline(slope = 1, intercept = 0, linetype = 2) +
+  geom_point(size = 3) +
+  geom_text(aes(label = scenario), hjust = -0.1, size = 3) +
+  theme_bw() +
+  labs(
+    x = "Without predator redistribution",
+    y = "With predator redistribution",
+    title = "Sensitivity of Trachylepis response to behavioural assumptions"
+  )
+
+comparison_plot
+```
+
+## Common scales across management plots
+
+To allow visual comparison across scenarios, we compute shared axis/colour
+limits based on the largest change observed in *any* scenario.
+
+```{r common-scales}
+max_species_change <- max(sapply(
+  management_results, function(x) max(abs(x$delta_mean_total_effect), na.rm = TRUE)
+))
+
+max_matrix_change <- max(sapply(
+  management_results, function(x) max(abs(x$delta_total_effect_matrix), na.rm = TRUE)
+))
+```
+
+## Scenario x species response matrix
+
+```{r scenario-species-matrix}
+management_species_matrix <- do.call(rbind, lapply(
+  management_results, function(x) x$delta_mean_total_effect
+))
+rownames(management_species_matrix) <- names(management_results)
+
+management_species_matrix <- management_species_matrix[
+  , names(sort(baseline_effects, decreasing = TRUE)), drop = FALSE
+]
+```
+
+## Summary tables
+
+```{r summary-tables}
+management_summary <- do.call(rbind, lapply(names(management_results), function(name) {
+  data.frame(
+    scenario = name,
+    species = names(management_results[[name]]$delta_mean_total_effect),
+    delta_mean_total_effect = as.numeric(management_results[[name]]$delta_mean_total_effect),
+    stringsAsFactors = FALSE
+  )
+}))
+
+management_sign_changes <- data.frame(
+  scenario = names(management_results),
+  sign_changes = sapply(management_results, function(x) x$sign_changes)
+)
+```
+
+## Responses of endemic / focal native species
+
+We track three species of particular conservation interest: the two
+endemic reptiles (*Trachylepis atlantica*, *Amphisbaena ridleyi*) and the
+native rodent *Kerodon rupestris*.
+
+```{r endemic-species}
+endemic_species <- c("Trachylepis_atlantica", "Amphisbaena_ridleyi", "Kerodon_rupestris")
+
+management_endemic_species <- do.call(rbind, lapply(names(management_results), function(name) {
+  data.frame(
+    scenario = name,
+    species = endemic_species,
+    delta_mean_total_effect =
+      management_results[[name]]$delta_mean_total_effect[endemic_species],
+    stringsAsFactors = FALSE
+  )
+}))
+```
+
+## Store per-scenario matrices
+
+```{r store-scenario-matrices}
+management_direct_effect_matrices <- list()
+management_total_effect_matrices <- list()
+management_delta_effect_matrices <- list()
+
+for (name in names(management_results)) {
+  management_direct_effect_matrices[[name]] <- management_results[[name]]$direct_effect_matrix
+  management_total_effect_matrices[[name]]  <- management_results[[name]]$total_effect_matrix
+  management_delta_effect_matrices[[name]]  <- management_results[[name]]$delta_total_effect_matrix
+}
+
+max_delta_effect <- max(abs(unlist(management_delta_effect_matrices)), na.rm = TRUE)
+```
+
+## Overall management comparison table
+
+For each scenario we summarize: the mean network-wide change, how many
+species responded positively/negatively (excluding the managed species
+themselves), the number of sign changes relative to baseline, and the
+specific predicted change for each of the three focal native/endemic
+species.
+
+```{r management-summary2}
+management_summary2 <- data.frame(
+  scenario = names(management_results),
+
+  mean_change = sapply(management_results, function(x) mean(x$delta_mean_total_effect)),
+
+  positive_species = sapply(management_results, function(x) sum(x$delta_mean_total_effect > 0)),
+
+  negative_species = sapply(names(management_results), function(name) {
+    delta <- management_results[[name]]$delta_mean_total_effect
+    managed_species <- management_scenarios[[name]]$source
+    delta <- delta[!(names(delta) %in% managed_species)]
+    sum(delta < 0)
+  }),
+
+  sign_changes = sapply(management_results, function(x) x$sign_changes)
+)
+
+management_summary2$Trachylepis <- sapply(
+  management_results, function(x) x$delta_mean_total_effect["Trachylepis_atlantica"]
+)
+management_summary2$Amphisbaena <- sapply(
+  management_results, function(x) x$delta_mean_total_effect["Amphisbaena_ridleyi"]
+)
+management_summary2$Kerodon <- sapply(
+  management_results, function(x) x$delta_mean_total_effect["Kerodon_rupestris"]
+)
+
+management_summary2
+```
+
+## Per-scenario heatmaps of change relative to baseline
+
+Managed (removed/reduced) species are excluded from each heatmap, since
+their own effect values are not meaningful once they are being removed
+from the system.
+
+```{r management-heatmaps, fig.height=8, fig.width=9}
+management_heatmaps <- list()
+
+for (name in names(management_results)) {
+
+  delta_matrix <- management_delta_effect_matrices[[name]]
+
+  managed_species <- unique(management_scenarios[[name]]$source)
+  delta_matrix <- delta_matrix[
+    !(rownames(delta_matrix) %in% managed_species),
+    !(colnames(delta_matrix) %in% managed_species),
+    drop = FALSE
+  ]
+  diag(delta_matrix) <- NA
+
+  df <- reshape2::melt(delta_matrix)
+  colnames(df) <- c("Receiver", "Source", "Effect")
+
+  management_heatmaps[[name]] <- ggplot(df, aes(Source, Receiver, fill = Effect)) +
+    geom_tile() +
+    scale_fill_gradient2(
+      low = "#762A83", mid = "white", high = "#1B7837",
+      midpoint = 0, limits = c(-max_delta_effect, max_delta_effect)
+    ) +
+    coord_fixed() +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 90, hjust = 1, size = 8),
+      axis.text.y = element_text(size = 8)
+    ) +
+    labs(
+      title = paste("Change relative to baseline:", name),
+      x = "Effect source",
+      y = "Effect receiver",
+      fill = expression(Delta * " total effect")
+    )
+}
+```
+
+## Per-scenario species-response bar plots
+
+Axes are standardized across all scenarios (`max_species_change`) so
+scenarios can be visually compared for effect magnitude.
+
+```{r species-response-plots}
+management_species_plots <- list()
+
+for (name in names(management_results)) {
+
+  df <- data.frame(
+    species = names(management_results[[name]]$delta_mean_total_effect),
+    delta = as.numeric(management_results[[name]]$delta_mean_total_effect)
+  )
+
+  managed_species <- management_scenarios[[name]]$source
+  df <- df[!(df$species %in% managed_species), ]
+  df <- df[order(df$delta), ]
+
+  management_species_plots[[name]] <- ggplot(
+    df, aes(x = reorder(species, delta), y = delta, fill = delta > 0)
+  ) +
+    geom_col() +
+    coord_flip() +
+    scale_y_continuous(limits = c(-max_species_change, max_species_change)) +
+    scale_fill_manual(values = c("#B2182B", "#1B7837"), guide = "none") +
+    geom_hline(yintercept = 0, colour = "black") +
+    labs(
+      title = paste("Species responses:", name),
+      subtitle = "Axis standardized across all management scenarios",
+      x = NULL,
+      y = expression(Delta * " mean total effect")
+    ) +
+    theme_bw()
+}
+```
+
+## Overall ecosystem-level response summary
+
+A single summary figure comparing the mean network-wide change in total
+effect across all management scenarios.
+
+```{r overall-summary-plot, fig.cap="Overall predicted ecosystem-wide response (mean total effect across all species) for each management scenario."}
+plot_management_summary <- ggplot(
+  management_summary2,
+  aes(x = reorder(scenario, mean_change), y = mean_change, fill = mean_change > 0)
+) +
+  geom_col() +
+  coord_flip() +
+  scale_y_continuous(limits = c(
+    -max(abs(management_summary2$mean_change)),
+    max(abs(management_summary2$mean_change))
+  )) +
+  scale_fill_manual(values = c("#B2182B", "#1B7837"), guide = "none") +
+  geom_hline(yintercept = 0) +
+  labs(title = "Overall ecosystem response", x = NULL, y = expression(Delta * " mean total effect")) +
+  theme_bw()
+
+plot_management_summary
+```
+
+---
+
+# Part VII — Save outputs
+
+All figures, summary tables, and full result objects (as `.rds` files, for
+re-loading into R without re-running the whole pipeline) are written to the
+`outputs/` folder.
+
+## Save main figures
+
+```{r save-main-figures}
+ggsave("outputs/Figure_01_Foodweb.png", foodweb_plot, width = 10, height = 8, dpi = 300)
+ggsave("outputs/Figure_02_DirectEffectsHeatmap.png", direct_effect_heatmap, width = 10, height = 9, dpi = 300)
+ggsave("outputs/Figure_03_TotalEffectsHeatmap.png", total_effect_heatmap, width = 10, height = 9, dpi = 300)
+ggsave("outputs/Figure_04_SensitivityHistogram.png", response_strength_sensitivity_plot, width = 8, height = 5, dpi = 300)
+ggsave("outputs/Figure_09_TopSpeciesStability.png", plot_top5_stability, width = 8, height = 5, dpi = 300)
+ggsave("outputs/Figure_10_Management_summary.png", plot_management_summary, width = 8, height = 6, dpi = 300)
+```
+
+## Save management-scenario heatmaps and species-response plots
+
+```{r save-scenario-figures}
+for (name in names(management_heatmaps)) {
+  ggsave(
+    filename = file.path("outputs", paste0("Management_", gsub("[^A-Za-z0-9]", "_", name), ".png")),
+    plot = management_heatmaps[[name]],
+    width = 9, height = 8, dpi = 300
+  )
+}
+
+for (name in names(management_species_plots)) {
+  ggsave(
+    filename = file.path("outputs", paste0("SpeciesResponse_", gsub("[^A-Za-z0-9]", "_", name), ".png")),
+    plot = management_species_plots[[name]],
+    width = 8, height = 6, dpi = 300
+  )
+}
+```
+
+## Save tables
+
+```{r save-tables}
+write.csv(direct_effect_matrix, "outputs/direct_effect_matrix.csv", row.names = TRUE)
+write.csv(total_effect_matrix, "outputs/total_effect_matrix.csv", row.names = TRUE)
+write.csv(effects_Matrix, "outputs/effects_input_matrix.csv", row.names = TRUE)
+write.csv(sensitivity_summary, "outputs/sensitivity_summary.csv", row.names = FALSE)
+write.csv(management_summary, "outputs/management_summary.csv", row.names = FALSE)
+write.csv(management_sign_changes, "outputs/management_sign_changes.csv", row.names = FALSE)
+write.csv(management_endemic_species, "outputs/management_endemic_species.csv", row.names = FALSE)
+write.csv(management_summary2, "outputs/management_summary2.csv", row.names = FALSE)
+```
+
+## Save complete result objects
+
+```{r save-rds}
+saveRDS(effect_results, "outputs/effect_results.rds")
+saveRDS(management_results, "outputs/management_results.rds")
+saveRDS(management_summary, "outputs/management_summary.rds")
+saveRDS(sensitivity_summary, "outputs/sensitivity_summary.rds")
+
+saveRDS(management_direct_effect_matrices, "outputs/management_direct_effect_matrices.rds")
+saveRDS(management_total_effect_matrices, "outputs/management_total_effect_matrices.rds")
+saveRDS(management_delta_effect_matrices, "outputs/management_delta_effect_matrices.rds")
+
+cat("\nOutputs successfully saved to 'outputs/'\n")
+```
+
+# Session info
+
+Included for reproducibility — records exact package versions used to
+generate this document.
+
+```{r session-info}
+sessionInfo()
+```

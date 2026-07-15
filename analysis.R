@@ -913,7 +913,8 @@ management_scenarios[["All_Invasive"]] <-
       c(
         "Felis_catus",
         "Rattus_spp",
-        "Salvator_merianae"
+        "Salvator_merianae",
+        "Rhinella"
       ),
     target = NA,
     reduction = 0.9999
@@ -923,15 +924,198 @@ management_scenarios[["All_Invasive"]] <-
 ## Run all scenarios
 ###############################################################################
 
+######################## TO USE FOR THE PLOTS
 management_results <- list()
 
 for(name in names(management_scenarios)){
   management_results[[name]] <- simulate_management_scenario(
     effect_matrix = effects_Matrix,
     response_strength = response_strength,
-    modifications =
-        management_scenarios[[name]]  
+    modifications = management_scenarios[[name]],
+    redistribution = "predator_diet"
   )}
+########################
+
+
+######################## TO USE FOR COMPARISON ###########################################################
+management_results_none <- list()
+
+for(name in names(management_scenarios)){
+  management_results_none[[name]] <-
+    simulate_management_scenario(
+      effect_matrix = effects_Matrix,
+      response_strength = response_strength,
+      modifications = management_scenarios[[name]],
+      redistribution = "none"
+    )
+}
+
+management_results_diet <- list()
+
+for(name in names(management_scenarios)){
+  management_results_diet[[name]] <-
+    simulate_management_scenario(
+      effect_matrix = effects_Matrix,
+      response_strength = response_strength,
+      modifications = management_scenarios[[name]],
+      redistribution = "predator_diet"
+    )
+}
+
+comparison_trachylepis <-
+  data.frame(
+    scenario = names(management_scenarios),
+    
+    no_redistribution =
+      sapply(
+        management_results_none,
+        function(x)
+          x$delta_mean_total_effect[
+            "Trachylepis_atlantica"
+          ]
+      ),
+    
+    predator_redistribution =
+      sapply(
+        management_results_diet,
+        function(x)
+          x$delta_mean_total_effect[
+            "Trachylepis_atlantica"
+          ]
+      )
+  )
+
+comparison_trachylepis$difference <-
+  comparison_trachylepis$predator_redistribution -
+  comparison_trachylepis$no_redistribution
+comparison_summary <-
+  data.frame(
+    scenario = names(management_scenarios),
+    
+    rank_correlation =
+      sapply(
+        names(management_scenarios),
+        function(name){
+          
+          cor(
+            management_results_none[[name]]$
+              delta_mean_total_effect,
+            
+            management_results_diet[[name]]$
+              delta_mean_total_effect,
+            
+            method = "spearman"
+          )
+          
+        }
+      ),
+    
+    mean_absolute_difference =
+      sapply(
+        names(management_scenarios),
+        function(name){
+          
+          mean(
+            abs(
+              management_results_none[[name]]$
+                delta_mean_total_effect -
+                
+                management_results_diet[[name]]$
+                delta_mean_total_effect
+            )
+          )
+          
+        }
+      ),
+    
+    max_absolute_difference =
+      sapply(
+        names(management_scenarios),
+        function(name){
+          
+          max(
+            abs(
+              management_results_none[[name]]$
+                delta_mean_total_effect -
+                
+                management_results_diet[[name]]$
+                delta_mean_total_effect
+            )
+          )
+          
+        }
+      )
+  )
+
+comparison_summary
+# comparison_summary <-
+#   data.frame(
+#     scenario = names(management_scenarios),
+#     
+#     correlation =
+#       sapply(
+#         names(management_scenarios),
+#         function(name){
+#           cor(
+#             management_results_none[[name]]$results$mean_total_effect,
+#             management_results_diet[[name]]$results$mean_total_effect,
+#             method = "spearman"
+#           )
+#         }
+#       ),
+#     
+#     mean_absolute_difference =
+#       sapply(
+#         names(management_scenarios),
+#         function(name){
+#           
+#           mean(
+#             abs(
+#               management_results_none[[name]]$
+#                 delta_mean_total_effect -
+#                 
+#                 management_results_diet[[name]]$
+#                 delta_mean_total_effect
+#             )
+#           )
+#           
+#         }
+#       )
+#   )
+
+comparison_plot <-
+  ggplot(
+    comparison_trachylepis,
+    aes(
+      no_redistribution,
+      predator_redistribution
+    )
+  ) +
+  
+  geom_abline(
+    slope = 1,
+    intercept = 0,
+    linetype = 2
+  ) +
+  
+  geom_point(size = 3) +
+  
+  geom_text(
+    aes(label = scenario),
+    hjust = -0.1,
+    size = 3
+  ) +
+  
+  theme_bw() +
+  
+  labs(
+    x = "Without predator redistribution",
+    y = "With predator redistribution",
+    title = "Sensitivity of Trachylepis response to behavioural assumptions"
+  )
+
+###########################################################
+
 
 ###############################################################################
 ## Common limits for management plots
@@ -1174,6 +1358,19 @@ for(name in names(management_results)){
   
   delta_matrix <-
     management_delta_effect_matrices[[name]]
+  
+  ## Remove managed species from the plot
+  managed_species <-
+    unique(
+      management_scenarios[[name]]$source
+    )
+  
+  delta_matrix <-
+    delta_matrix[
+      !(rownames(delta_matrix) %in% managed_species),
+      !(colnames(delta_matrix) %in% managed_species),
+      drop = FALSE
+    ]
   
   diag(delta_matrix) <- NA
   

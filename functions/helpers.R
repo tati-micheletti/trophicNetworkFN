@@ -292,8 +292,13 @@ calculate_effect_matrix <- function(mat, R) {
 simulate_management_scenario <- function(
     effect_matrix,
     response_strength,
-    modifications){
-  
+    modifications,
+    redistribution = c("none", "predator_diet")){
+  # "none" = legacy implementation: when a species disappears, it disappears
+  # "predator_diet" = redistribute the removed prey pressure among the 
+  #                   predator's remaining prey.  
+  redistribution <-
+    match.arg(redistribution)
   scenario_matrix <- effect_matrix
   
   ## -------------------------------------------------------------------------
@@ -321,19 +326,107 @@ simulate_management_scenario <- function(
     
     if(is.na(target)){
       
+      ############################################################
+      ## Store original effects BEFORE removing the species
+      ############################################################
+      
+      original_column <-
+        scenario_matrix[, source]
+      
+      ############################################################
+      ## Remove (or reduce) the managed species
+      ############################################################
+      
       scenario_matrix[, source] <-
-        scenario_matrix[, source] *
+        original_column *
         (1 - reduction)
       
-    }else{
+      ############################################################
+      ## Optional predator diet redistribution
+      ############################################################
+      
+      if(redistribution == "predator_diet"){
+        
+        ## Which predators consume this prey?
+        # predators <-
+        #   names(original_column)[abs(original_column) > 0]
+        predators <-
+          colnames(scenario_matrix)[
+            abs(original_column) > 0
+          ]
+        
+        ## Don't redistribute to the removed species itself
+        predators <-
+          setdiff(predators, source)
+        
+        for(predator in predators){
+          
+          ## Current diet of this predator
+          diet <-
+            abs(scenario_matrix[, predator])
+          
+          ## Amount of diet removed
+          removed_amount <-
+            abs(original_column[predator]) * reduction
+          
+          if(removed_amount == 0)
+            next
+          
+          ## Remaining prey
+          diet[source] <-
+            diet[source] * (1 - reduction)
+          
+          remaining_prey <-
+            names(diet)[diet > 0]
+          
+          remaining_prey <-
+            setdiff(remaining_prey, source)
+          
+          if(length(remaining_prey) == 0)
+            next
+          
+          ## Redistribute proportionally
+          weights <-
+            diet[remaining_prey] /
+            sum(diet[remaining_prey])
+          
+          diet[remaining_prey] <-
+            diet[remaining_prey] +
+            removed_amount * weights
+          
+          ## Restore original signs
+          scenario_matrix[, predator] <-
+            diet * sign(scenario_matrix[, predator])
+          
+        }
+        
+      }
+      
+    } else {
+      
+      ############################################################
+      ## Modify only one interaction
+      ############################################################
       
       scenario_matrix[target, source] <-
         scenario_matrix[target, source] *
         (1 - reduction)
       
     }
-    
-  }
+    # OLDER IMPLEMENTATION 
+    # if(is.na(target)){
+    #   
+    #   scenario_matrix[, source] <-
+    #     scenario_matrix[, source] *
+    #     (1 - reduction)
+    #   
+    # }else{
+    #   
+    #   scenario_matrix[target, source] <-
+    #     scenario_matrix[target, source] *
+    #     (1 - reduction)
+    #   }
+    }
   
   ## -------------------------------------------------------------------------
   ## Recalculate network
