@@ -885,39 +885,76 @@ for(predator in managed_predators){
 ## Combined predator eradications
 ###############################################################################
 
-management_scenarios[["Cats_and_Rats"]] <-
+management_scenarios$Cats_and_Rats <-
   data.frame(
-    source =
-      c(
-        "Felis_catus",
-        "Rattus_spp"
-      ),
+    source = c(
+      "Felis_catus",
+      "Rattus_spp"
+    ),
     target = NA,
-    reduction = 0.9999
-    )
-
-management_scenarios[["Cats_and_Tegu"]] <-
-  data.frame(
-    source =
-      c(
-        "Felis_catus",
-        "Salvator_merianae"
-      ),
-    target = NA,
-    reduction = 0.9999
+    reduction = 0.99999
   )
 
-management_scenarios[["All_Invasive"]] <-
+management_scenarios$Cats_and_Rhinella <-
   data.frame(
-    source =
-      c(
-        "Felis_catus",
-        "Rattus_spp",
-        "Salvator_merianae",
-        "Rhinella"
-      ),
+    source = c(
+      "Felis_catus",
+      "Rhinella"
+    ),
     target = NA,
-    reduction = 0.9999
+    reduction = 0.99999
+  )
+
+management_scenarios$Cats_and_Tegu <-
+  data.frame(
+    source = c(
+      "Felis_catus",
+      "Salvator_merianae"
+    ),
+    target = NA,
+    reduction = 0.99999
+  )
+
+management_scenarios$Rats_and_Tegu <-
+  data.frame(
+    source = c(
+      "Rattus_spp",
+      "Salvator_merianae"
+    ),
+    target = NA,
+    reduction = 0.99999
+  )
+
+management_scenarios$Rats_and_Rhinella <-
+  data.frame(
+    source = c(
+      "Rattus_spp",
+      "Rhinella"
+    ),
+    target = NA,
+    reduction =0.99999
+  )
+
+management_scenarios$Tegu_and_Rhinella <-
+  data.frame(
+    source = c(
+      "Salvator_merianae",
+      "Rhinella"
+    ),
+    target = NA,
+    reduction = 0.99999
+  )
+
+management_scenarios$All_Invasive <-
+  data.frame(
+    source = c(
+      "Felis_catus",
+      "Rattus_spp",
+      "Salvator_merianae",
+      "Rhinella"
+    ),
+    target = NA,
+    reduction = 0.99999
   )
 
 ###############################################################################
@@ -932,8 +969,17 @@ for(name in names(management_scenarios)){
     effect_matrix = effects_Matrix,
     response_strength = response_strength,
     modifications = management_scenarios[[name]],
-    redistribution = "predator_diet"
-  )}
+    redistribution = "predator_diet")
+  
+  management_results[[name]]$delta_received_effect <-
+    rowSums(
+      management_results[[name]]$
+        delta_total_effect_matrix,
+      na.rm = TRUE
+    )
+  }
+
+
 ########################
 
 
@@ -946,7 +992,13 @@ for(name in names(management_scenarios)){
       effect_matrix = effects_Matrix,
       response_strength = response_strength,
       modifications = management_scenarios[[name]],
-      redistribution = "none"
+      redistribution = "none")
+  
+  management_results_none[[name]]$delta_received_effect <-
+    rowSums(
+      management_results_none[[name]]$
+        delta_total_effect_matrix,
+      na.rm = TRUE
     )
 }
 
@@ -958,7 +1010,13 @@ for(name in names(management_scenarios)){
       effect_matrix = effects_Matrix,
       response_strength = response_strength,
       modifications = management_scenarios[[name]],
-      redistribution = "predator_diet"
+      redistribution = "predator_diet")
+  
+  management_results_diet[[name]]$delta_received_effect <-
+    rowSums(
+      management_results_diet[[name]]$
+        delta_total_effect_matrix,
+      na.rm = TRUE
     )
 }
 
@@ -1429,32 +1487,61 @@ for(name in names(management_results)){
 }
 
 ###############################################################################
-## Species responses to management
+## Ecological responses to management
 ###############################################################################
 
-management_species_plots <- list()
+max_ecological_change <-
+  max(
+    sapply(
+      management_results,
+      function(x)
+        max(
+          abs(x$delta_received_effect),
+          na.rm = TRUE
+        )
+    )
+  )
 
-for(name in names(management_results)){
-  
+############################################################
+## Only plot complete eradication scenarios
+############################################################
+
+plot_scenarios <-
+  c(
+    "Felis_catus_100percent",
+    "Rattus_spp_100percent",
+    "Salvator_merianae_100percent",
+    "Rhinella_100percent",
+    "All_Invasive",
+    "Cats_and_Rats",
+    "Cats_and_Rhinella",
+    "Cats_and_Tegu",
+    "Rats_and_Tegu",
+    "Rats_and_Rhinella",
+    "Tegu_and_Rhinella"
+  )
+
+management_ecological_plots <- list()
+released_pressure_plots <- list()
+
+for(name in plot_scenarios){
   df <-
     data.frame(
       species =
         names(
           management_results[[name]]$
-            delta_mean_total_effect
+            delta_received_effect
         ),
       delta =
         as.numeric(
           management_results[[name]]$
-            delta_mean_total_effect
+            delta_received_effect
         )
     )
   
-  ## Species that are actively managed in this scenario
   managed_species <-
     management_scenarios[[name]]$source
   
-  ## Do not plot the managed species themselves
   df <-
     df[
       !(df$species %in% managed_species),
@@ -1465,7 +1552,11 @@ for(name in names(management_results)){
       order(df$delta),
     ]
   
-  management_species_plots[[name]] <-
+  cat(name, "\n")
+  print(dim(df))
+  print(head(df))
+  
+  management_ecological_plots[[name]] <-
     
     ggplot(
       df,
@@ -1482,8 +1573,8 @@ for(name in names(management_results)){
     
     scale_y_continuous(
       limits = c(
-        -max_species_change,
-        max_species_change
+        -max_ecological_change,
+        max_ecological_change
       )
     ) +
     
@@ -1502,16 +1593,123 @@ for(name in names(management_results)){
     
     labs(
       title = paste(
-        "Species responses:",
+        "Ecological response:",
         name
       ),
-      
-      subtitle ="Axis standardized across all management scenarios",
+      subtitle =
+        "Positive values indicate species experiencing less total pressure",
       x = NULL,
-      y = expression(Delta*" mean total effect")
+      y = expression(Delta*" received pressure")
     ) +
     
     theme_bw()
+  
+
+  ############################################################
+  ## Direct predation released
+  ############################################################
+  
+  managed_species <-
+    unique(
+      management_scenarios[[name]]$source
+    )
+  
+  ############################################################
+  ## Build matrix containing ONLY removed predators
+  ############################################################
+  
+  released_matrix <-
+    effect_results$direct_effect_matrix[
+      ,
+      managed_species,
+      drop = FALSE
+    ]
+  
+  ############################################################
+  ## Convert predation pressure into released pressure
+  ############################################################
+  
+  released_matrix <-
+    -released_matrix
+  
+  released_matrix[
+    released_matrix <= 0
+  ] <- NA
+  
+  ############################################################
+  ## Removed predators should not appear as receivers
+  ############################################################
+  
+  released_matrix <-
+    released_matrix[
+      !(rownames(released_matrix) %in% managed_species),
+      ,
+      drop = FALSE
+    ]
+  
+  ############################################################
+  ## Long format
+  ############################################################
+  
+  df <-
+    reshape2::melt(
+      released_matrix,
+      na.rm = TRUE
+    )
+  
+  colnames(df) <-
+    c(
+      "Receiver",
+      "Source",
+      "Released"
+    )
+  
+  ############################################################
+  ## Plot
+  ############################################################
+  
+  released_pressure_plots[[name]] <-
+    
+    ggplot(
+      df,
+      aes(
+        Source,
+        Receiver,
+        fill = Released
+      )
+    ) +
+    
+    geom_tile() +
+    
+    scale_fill_gradient(
+      low = "white",
+      high = "#2166AC"
+    ) +
+    
+    coord_fixed() +
+    
+    theme_bw() +
+    
+    theme(
+      axis.text.x =
+        element_text(
+          angle = 90,
+          hjust = 1,
+          size = 8
+        ),
+      axis.text.y =
+        element_text(size = 8)
+    ) +
+    
+    labs(
+      title = paste(
+        "Direct predation released:",
+        name
+      ),
+      x = "Removed predator",
+      y = "Released prey",
+      fill = "Released\npressure"
+    )
 }
 
 ###############################################################################
@@ -1640,29 +1838,50 @@ for(name in names(management_heatmaps)){
   
 }
 
+############################################################
+## Save direct-release plots
+############################################################
+
+for(name in names(released_pressure_plots)){
+  
+  ggsave(
+    filename = file.path(
+      "outputs",
+      paste0(
+        "DirectPredationReleased_",
+        name,
+        ".png"
+      )
+    ),
+    plot = released_pressure_plots[[name]],
+    width = 8,
+    height = 7,
+    dpi = 300
+  )
+  
+}
 ###############################################################################
-## Save species-response plots
+## Save ecological-response plots
 ###############################################################################
 
-for(name in names(management_species_plots)){
-  
+for(name in names(management_ecological_plots)){
   ggsave(
     filename =
       file.path(
         "outputs",
         paste0(
-          "SpeciesResponse_",
+          "EcologicalResponse_",
           gsub("[^A-Za-z0-9]", "_", name),
           ".png"
         )
       ),
-    plot = management_species_plots[[name]],
+    plot = management_ecological_plots[[name]],
     width = 8,
     height = 6,
     dpi = 300
   )
-  
 }
+
 ## ---------------------------------------------------------------------------
 ## Save tables
 ## ---------------------------------------------------------------------------
